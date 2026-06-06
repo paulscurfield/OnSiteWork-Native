@@ -1,0 +1,41 @@
+{
+  "name": "JobPhoto",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string"
+    },
+    "worker_email": {
+      "type": "string"
+    },
+    "worker_name": {
+      "type": "string"
+    },
+    "job_id": {
+      "type": "string"
+    },
+    "job_name": {
+      "type": "string"
+    },
+    "job_number": {
+      "type": "string"
+    },
+    "photo_url": {
+      "type": "string",
+      "description": "URL of the uploaded photo"
+    },
+    "date": {
+      "type": "string",
+      "format": "date"
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "company_id",
+    "worker_email",
+    "photo_url",
+    "date"
+  ]
+}

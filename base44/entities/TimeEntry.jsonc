@@ -1,0 +1,79 @@
+{
+  "name": "TimeEntry",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "description": "ID of the company this entry belongs to"
+    },
+    "worker_email": {
+      "type": "string",
+      "description": "Email of the worker"
+    },
+    "worker_name": {
+      "type": "string",
+      "description": "Name of the worker"
+    },
+    "job_id": {
+      "type": "string",
+      "description": "ID of the job"
+    },
+    "job_name": {
+      "type": "string",
+      "description": "Name of the job"
+    },
+    "job_number": {
+      "type": "string",
+      "description": "Job number"
+    },
+    "date": {
+      "type": "string",
+      "format": "date",
+      "description": "Date of work"
+    },
+    "start_time": {
+      "type": "string",
+      "description": "Clock in time (ISO)"
+    },
+    "finish_time": {
+      "type": "string",
+      "description": "Clock out time (ISO)"
+    },
+    "lunch_break_mins": {
+      "type": "number",
+      "description": "Lunch break duration in minutes (0 = no break)",
+      "default": 0
+    },
+    "total_hours": {
+      "type": "number",
+      "description": "Total hours worked (after lunch deduction)"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "active",
+        "completed",
+        "manual"
+      ],
+      "default": "active"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "worker_lat": {
+      "type": "number",
+      "description": "Worker's GPS latitude (only set while clocked in)"
+    },
+    "worker_lng": {
+      "type": "number",
+      "description": "Worker's GPS longitude (only set while clocked in)"
+    }
+  },
+  "required": [
+    "company_id",
+    "worker_email",
+    "job_id",
+    "date",
+    "start_time"
+  ]
+}

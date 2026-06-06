@@ -1,0 +1,42 @@
+{
+  "name": "EquipmentLog",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string"
+    },
+    "equipment_id": {
+      "type": "string"
+    },
+    "equipment_name": {
+      "type": "string"
+    },
+    "worker_email": {
+      "type": "string"
+    },
+    "worker_name": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "checked_out",
+        "returned"
+      ],
+      "default": "checked_out"
+    },
+    "timestamp": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "company_id",
+    "equipment_id",
+    "worker_email",
+    "action",
+    "timestamp"
+  ]
+}

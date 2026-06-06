@@ -1,0 +1,52 @@
+{
+  "name": "LeaveRequest",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string"
+    },
+    "worker_email": {
+      "type": "string"
+    },
+    "worker_name": {
+      "type": "string"
+    },
+    "leave_type": {
+      "type": "string",
+      "enum": [
+        "annual",
+        "sick",
+        "personal",
+        "other"
+      ],
+      "default": "annual"
+    },
+    "start_date": {
+      "type": "string",
+      "format": "date"
+    },
+    "end_date": {
+      "type": "string",
+      "format": "date"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "approved",
+        "declined"
+      ],
+      "default": "pending"
+    }
+  },
+  "required": [
+    "company_id",
+    "worker_email",
+    "start_date",
+    "end_date",
+    "leave_type"
+  ]
+}

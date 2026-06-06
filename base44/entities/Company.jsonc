@@ -1,0 +1,41 @@
+{
+  "name": "Company",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Company name"
+    },
+    "slug": {
+      "type": "string",
+      "description": "URL-friendly company identifier"
+    },
+    "owner_email": {
+      "type": "string",
+      "description": "Email of the admin who created the company"
+    },
+    "industry": {
+      "type": "string",
+      "description": "Industry type e.g. landscaping, construction"
+    },
+    "phone": {
+      "type": "string"
+    },
+    "address": {
+      "type": "string"
+    },
+    "subscription_status": {
+      "type": "string",
+      "enum": [
+        "trial",
+        "active",
+        "cancelled"
+      ],
+      "default": "trial"
+    }
+  },
+  "required": [
+    "name",
+    "owner_email"
+  ]
+}

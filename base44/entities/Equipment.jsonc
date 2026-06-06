@@ -1,0 +1,60 @@
+{
+  "name": "Equipment",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "description": "ID of the company this equipment belongs to"
+    },
+    "name": {
+      "type": "string",
+      "description": "Equipment name"
+    },
+    "equipment_id": {
+      "type": "string",
+      "description": "Unique equipment ID/tag"
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "machinery",
+        "tools",
+        "vehicle",
+        "safety",
+        "electrical",
+        "other"
+      ],
+      "default": "tools"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "available",
+        "checked_out",
+        "maintenance"
+      ],
+      "default": "available"
+    },
+    "photo_url": {
+      "type": "string",
+      "description": "URL of equipment photo"
+    },
+    "checked_out_by_email": {
+      "type": "string"
+    },
+    "checked_out_by_name": {
+      "type": "string"
+    },
+    "checked_out_at": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "company_id",
+    "name",
+    "equipment_id"
+  ]
+}

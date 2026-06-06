@@ -1,0 +1,59 @@
+{
+  "name": "PreStart",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string"
+    },
+    "equipment_id": {
+      "type": "string"
+    },
+    "equipment_name": {
+      "type": "string"
+    },
+    "worker_email": {
+      "type": "string"
+    },
+    "worker_name": {
+      "type": "string"
+    },
+    "job_id": {
+      "type": "string"
+    },
+    "job_name": {
+      "type": "string"
+    },
+    "job_number": {
+      "type": "string"
+    },
+    "date": {
+      "type": "string",
+      "format": "date"
+    },
+    "answers": {
+      "type": "object",
+      "description": "Map of question index to selected answer"
+    },
+    "general_comments": {
+      "type": "string"
+    },
+    "has_faults": {
+      "type": "boolean",
+      "default": false
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fault"
+      ],
+      "default": "pass"
+    }
+  },
+  "required": [
+    "company_id",
+    "equipment_id",
+    "worker_email",
+    "date"
+  ]
+}

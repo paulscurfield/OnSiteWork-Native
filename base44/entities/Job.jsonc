@@ -1,0 +1,48 @@
+{
+  "name": "Job",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "description": "ID of the company this job belongs to"
+    },
+    "job_name": {
+      "type": "string",
+      "description": "Name of the job site"
+    },
+    "job_number": {
+      "type": "string",
+      "description": "Unique job number"
+    },
+    "location_address": {
+      "type": "string",
+      "description": "Street address of the job site"
+    },
+    "latitude": {
+      "type": "number",
+      "description": "GPS latitude"
+    },
+    "longitude": {
+      "type": "number",
+      "description": "GPS longitude"
+    },
+    "notes": {
+      "type": "string",
+      "description": "Additional notes about the job"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "active",
+        "completed",
+        "on_hold"
+      ],
+      "default": "active"
+    }
+  },
+  "required": [
+    "company_id",
+    "job_name",
+    "job_number"
+  ]
+}

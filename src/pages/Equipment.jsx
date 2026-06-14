@@ -238,11 +238,16 @@ OnSite Timesheet`;
     loadEquipment();
   };
 
-  const filtered = equipment.filter(e => {
-    const matchSearch = e.name?.toLowerCase().includes(search.toLowerCase()) || e.equipment_id?.toLowerCase().includes(search.toLowerCase());
-    const matchFilter = filter === 'all' || e.status === filter;
-    return matchSearch && matchFilter;
-  });
+  const filtered = equipment
+    .filter(e => {
+      const matchSearch = e.name?.toLowerCase().includes(search.toLowerCase()) || e.equipment_id?.toLowerCase().includes(search.toLowerCase());
+      const matchFilter = filter === 'all' || e.status === filter;
+      return matchSearch && matchFilter;
+    })
+    .sort((a, b) => {
+      const order = { checked_out: 0, maintenance: 1, available: 2 };
+      return (order[a.status] ?? 2) - (order[b.status] ?? 2);
+    });
 
   return (
     <div className="min-h-screen bg-background">

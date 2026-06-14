@@ -17,13 +17,22 @@ export function CompanyProvider({ children }) {
       const allCompanies = await base44.entities.Company.list();
 
       if (user.role === 'admin') {
-        // Admin: find the company they own by their email
-        const ownCompany = allCompanies.find(c => c.owner_email === user.email);
-        if (ownCompany) {
-          if (user.company_id !== ownCompany.id) {
-            await base44.auth.updateMe({ company_id: ownCompany.id });
+        let foundCompany = null;
+        const isAppOwner = user.email === 'paulscurfield@gmail.com' || user.email === 'paul.scurfield@icloud.com';
+
+        if (user.company_id) {
+          foundCompany = allCompanies.find(c => c.id === user.company_id);
+        }
+
+        if (!foundCompany && isAppOwner) {
+          foundCompany = allCompanies.find(c => c.owner_email === user.email);
+        }
+
+        if (foundCompany) {
+          if (user.company_id !== foundCompany.id) {
+            await base44.auth.updateMe({ company_id: foundCompany.id });
           }
-          setCompany(ownCompany);
+          setCompany(foundCompany);
         }
         // If no company found for admin, they'll see Onboarding (company is null)
       } else {

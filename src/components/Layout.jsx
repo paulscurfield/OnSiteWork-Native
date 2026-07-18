@@ -1,6 +1,5 @@
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import { Home, User, Briefcase, CalendarDays, Clock, MessageSquare, Wrench } from 'lucide-react';
-import { cn } from '@/lib/utils';
 
 const navItems = [
   { path: '/', icon: Home, label: 'Home' },

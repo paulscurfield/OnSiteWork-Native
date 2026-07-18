@@ -303,6 +303,10 @@ const createJobSchedulesAdapter = () => ({
     );
   },
 
+  /**
+   * @param {{ company_id?: string, start_date?: string, end_date?: string }} [range]
+   * @param {string} [orderBy]
+   */
   async forDateRange({ company_id, start_date, end_date } = {}, orderBy = 'start_date') {
     const startDate = toDateOnly(start_date, 'start_date');
     const endDate = toDateOnly(end_date, 'end_date');

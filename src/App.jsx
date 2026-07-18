@@ -20,6 +20,7 @@ import Messages from './pages/Messages';
 import Equipment from './pages/Equipment';
 import Admin from './pages/Admin';
 import Leave from './pages/Leave';
+import Calendar from './pages/Calendar';
 import TeamMap from './pages/TeamMap';
 import SitePhotos from './pages/SitePhotos';
 import Onboarding from './pages/Onboarding';
@@ -107,6 +108,7 @@ const AuthenticatedApp = () => {
         <Route path="/equipment" element={<Equipment />} />
         <Route path="/admin" element={<Admin />} />
         <Route path="/leave" element={<Leave />} />
+        <Route path="/calendar" element={<Calendar />} />
         <Route path="/team-map" element={<TeamMap />} />
         <Route path="/site-photos" element={<SitePhotos />} />
         <Route path="/prestart" element={<PreStart />} />

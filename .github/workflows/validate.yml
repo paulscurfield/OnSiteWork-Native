@@ -30,13 +30,16 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Install dependencies
+        id: install
         run: npm ci
 
       - name: Run lint
         run: npm run lint
 
       - name: Run typecheck
+        if: ${{ always() && steps.install.outcome == 'success' }}
         run: npm run typecheck
 
       - name: Run build
+        if: ${{ always() && steps.install.outcome == 'success' }}
         run: npm run build

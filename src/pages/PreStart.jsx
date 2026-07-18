@@ -171,12 +171,18 @@ export default function PreStart() {
   const [user, setUser] = useState(null);
   const [equipment, setEquipment] = useState(null);
   const [activeJob, setActiveJob] = useState(null);
+  const [jobs, setJobs] = useState([]);
+  const [selectedJobId, setSelectedJobId] = useState('');
   const [answers, setAnswers] = useState({});
   const [generalComments, setGeneralComments] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     const init = async () => {
+      setActiveJob(null);
+      setJobs([]);
+      setSelectedJobId('');
+
       const u = await base44.auth.me().catch(() => null);
       setUser(u);
 
@@ -187,14 +193,24 @@ export default function PreStart() {
         if (results.length > 0) setEquipment(results[0]);
       }
 
-      // Find worker's active clock-in to get job site
       if (u && company?.id) {
+        const allJobs = await base44.entities.Job.filter({
+          company_id: company.id,
+          status: 'active',
+        }).catch(() => []);
+        setJobs(allJobs);
+
         const active = await base44.entities.TimeEntry.filter({ company_id: company.id, worker_email: u.email, status: 'active' }).catch(() => []);
-        if (active.length > 0) setActiveJob({ id: active[0].job_id, name: active[0].job_name, number: active[0].job_number });
+        if (active.length > 0) {
+          setActiveJob({ id: active[0].job_id, name: active[0].job_name, number: active[0].job_number });
+          setSelectedJobId(active[0].job_id);
+        }
       }
     };
     init();
   }, [company]);
+
+  const selectedJob = activeJob || jobs.find(job => job.id === selectedJobId) || null;
 
   const setAnswer = (questionId, optionLabel) => {
     setAnswers(prev => ({ ...prev, [questionId]: optionLabel }));
@@ -209,6 +225,10 @@ export default function PreStart() {
   const handleSubmit = async () => {
     if (!allAnswered) {
       toast.error('Please answer all questions before submitting.');
+      return;
+    }
+    if (!selectedJob) {
+      toast.error('Please select a job site before submitting.');
       return;
     }
     setSaving(true);
@@ -227,9 +247,9 @@ export default function PreStart() {
       equipment_name: equipment?.name || 'Unknown',
       worker_email: user?.email || '',
       worker_name: user?.full_name || '',
-      job_id: activeJob?.id || '',
-      job_name: activeJob?.name || '',
-      job_number: activeJob?.number || '',
+      job_id: selectedJob.id,
+      job_name: selectedJob.name || selectedJob.job_name || '',
+      job_number: selectedJob.number || selectedJob.job_number || '',
       date: format(new Date(), 'yyyy-MM-dd'),
       answers,
       general_comments: generalComments,
@@ -252,7 +272,7 @@ export default function PreStart() {
         </button>
         <div className="flex-1 min-w-0">
           <h1 className="text-lg font-black truncate">Pre-Start Checklist</h1>
-          {equipment && <p className="text-xs text-primary font-semibold truncate">{equipment.name} · #{equipment.equipment_id}{activeJob ? ` · ${activeJob.name}` : ''}</p>}
+          {equipment && <p className="text-xs text-primary font-semibold truncate">{equipment.name} · #{equipment.equipment_id}{selectedJob ? ` · ${selectedJob.name || selectedJob.job_name}` : ''}</p>}
         </div>
       </div>
 
@@ -265,6 +285,34 @@ export default function PreStart() {
         <div className="w-full bg-muted rounded-full h-2">
           <div className="bg-primary h-2 rounded-full transition-all duration-300"
             style={{ width: `${(Object.keys(answers).length / QUESTIONS.filter(q => !q.isTextArea).length) * 100}%` }} />
+        </div>
+      </div>
+
+      {/* Job Selector */}
+      <div className="px-6 pb-2">
+        <div className="bg-card border border-border rounded-2xl p-4">
+          <p className="text-xs font-black text-primary mb-1">JOB SITE</p>
+          {activeJob ? (
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-green-400 flex-shrink-0" />
+              <p className="font-bold text-sm">{activeJob.name}{activeJob.number ? ` #${activeJob.number}` : ''}</p>
+              <span className="text-[10px] bg-green-500/15 text-green-400 px-2 py-0.5 rounded-full font-semibold ml-auto">Clocked In</span>
+            </div>
+          ) : (
+            <div>
+              <p className="text-sm text-muted-foreground mb-2">You're not clocked in - select the job site for this pre-start:</p>
+              <select
+                value={selectedJobId}
+                onChange={event => setSelectedJobId(event.target.value)}
+                className="w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary"
+              >
+                <option value="">Select a job site</option>
+                {jobs.map(job => (
+                  <option key={job.id} value={job.id}>{job.job_name}{job.job_number ? ` #${job.job_number}` : ''}</option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
       </div>
 

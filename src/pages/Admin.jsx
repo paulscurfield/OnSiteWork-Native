@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { base44 } from '@/api/base44Client';
 import { useCompany } from '@/lib/companyContext';
 import { Link } from 'react-router-dom';
-import { ChevronLeft, Plus, Pencil, Trash2, Download, Briefcase, Users, Clock, X, Check, MapPin, FileText, UserPlus, Mail, Loader2, Image, Camera, AlertTriangle, ClipboardList } from 'lucide-react';
+import { ChevronLeft, Plus, Pencil, Trash2, Download, Users, Clock, X, Check, MapPin, FileText, UserPlus, Mail, Loader2, Camera, AlertTriangle } from 'lucide-react';
 import { format, parseISO, startOfWeek, addDays } from 'date-fns';
 import { toast } from 'sonner';
 

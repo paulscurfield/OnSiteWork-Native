@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { base44 } from '@/api/base44Client';
 import { useCompany } from '@/lib/companyContext';
 import { Link } from 'react-router-dom';
-import { Briefcase, MapPin, ChevronLeft, ChevronRight, Search, Clock, Trash2, Pencil, X, Navigation, Plus, Check } from 'lucide-react';
+import { Briefcase, MapPin, ChevronLeft, ChevronRight, Search, Trash2, Pencil, X, Navigation, Plus, Check } from 'lucide-react';
 import { toast } from 'sonner';
 
 const statusColors = {

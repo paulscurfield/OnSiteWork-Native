@@ -2,7 +2,6 @@ import React from 'react';
 import { base44 } from '@/api/base44Client';
 import { useQuery } from '@tanstack/react-query';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Badge } from '@/components/ui/badge';
 import { Loader2, ArrowRightLeft, CheckCircle } from 'lucide-react';
 import { format } from 'date-fns';
 

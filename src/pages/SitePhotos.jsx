@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { base44 } from '@/api/base44Client';
 import { useCompany } from '@/lib/companyContext';
 import { Link } from 'react-router-dom';
-import { ChevronLeft, Camera, Loader2, X, Image } from 'lucide-react';
+import { ChevronLeft, Camera, Loader2, Image } from 'lucide-react';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
 

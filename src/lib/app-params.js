@@ -1,6 +1,24 @@
 const isNode = typeof window === 'undefined';
-const windowObj = isNode ? { localStorage: new Map() } : window;
-const storage = windowObj.localStorage;
+
+/**
+ * @typedef {{
+ * 	getItem: (key: string) => string | null,
+ * 	setItem: (key: string, value: string) => void,
+ * 	removeItem: (key: string) => void
+ * }} AppStorage
+ */
+
+const createMemoryStorage = () => {
+	const values = new Map();
+	return {
+		getItem: (key) => values.has(key) ? values.get(key) : null,
+		setItem: (key, value) => values.set(key, String(value)),
+		removeItem: (key) => values.delete(key),
+	};
+}
+
+/** @type {AppStorage} */
+const storage = isNode ? createMemoryStorage() : window.localStorage;
 
 const toSnakeCase = (str) => {
 	return str.replace(/([A-Z])/g, '_$1').toLowerCase();

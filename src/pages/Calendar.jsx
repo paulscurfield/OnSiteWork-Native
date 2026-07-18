@@ -74,6 +74,8 @@ const sortByDate = (a, b) => {
   return (a.title || '').localeCompare(b.title || '');
 };
 
+const isLeaveSchedule = (schedule) => schedule?.source_type === 'leave';
+
 const resolveSupabaseCompany = (profile, companyRows) => {
   if (!profile?.id) {
     throw new Error('Not authenticated with Supabase');
@@ -139,30 +141,12 @@ export default function Calendar() {
 
       const resolvedCompany = resolveSupabaseCompany(profile, companyRows);
       let scheduleRows = [];
-      let jobRows = [];
-      let workerRows = [];
-      const hasValidRange = range.start_date && range.end_date;
+      const hasCompleteRange = range.start_date && range.end_date;
 
-      if (hasValidRange) {
-        const startDate = requireDateOnly(range.start_date, 'Start date');
-        const endDate = requireDateOnly(range.end_date, 'End date');
-        if (endDate < startDate) throw new Error('End date cannot be before start date');
-
-        [scheduleRows, jobRows, workerRows] = await Promise.all([
-          onsiteApi.tables.jobSchedules.forDateRange({
-            company_id: resolvedCompany.id,
-            start_date: startDate,
-            end_date: endDate,
-          }),
-          onsiteApi.tables.jobs.filter({ company_id: resolvedCompany.id }, 'job_name'),
-          onsiteApi.tables.companyMembers.directory(resolvedCompany.id),
-        ]);
-      } else {
-        [jobRows, workerRows] = await Promise.all([
-          onsiteApi.tables.jobs.filter({ company_id: resolvedCompany.id }, 'job_name'),
-          onsiteApi.tables.companyMembers.directory(resolvedCompany.id),
-        ]);
-      }
+      const [jobRows, workerRows] = await Promise.all([
+        onsiteApi.tables.jobs.filter({ company_id: resolvedCompany.id }, 'job_name'),
+        onsiteApi.tables.companyMembers.directory(resolvedCompany.id),
+      ]);
       if (requestId !== requestIdRef.current) return;
 
       const resolvedMember = workerRows.find((worker) => worker.user_id === profile.id);
@@ -172,11 +156,30 @@ export default function Calendar() {
 
       setSupabaseCompany(resolvedCompany);
       setCurrentMember(resolvedMember);
-      setSchedules([...scheduleRows].sort(sortByDate));
       setJobs(jobRows);
       setWorkers(workerRows);
+
+      if (hasCompleteRange) {
+        const startDate = requireDateOnly(range.start_date, 'Start date');
+        const endDate = requireDateOnly(range.end_date, 'End date');
+        if (endDate < startDate) throw new Error('End date cannot be before start date');
+
+        scheduleRows = await onsiteApi.tables.jobSchedules.forDateRange({
+          company_id: resolvedCompany.id,
+          start_date: startDate,
+          end_date: endDate,
+        });
+      } else {
+        setSchedules([]);
+      }
+      if (requestId !== requestIdRef.current) return;
+
+      if (hasCompleteRange) {
+        setSchedules([...scheduleRows].sort(sortByDate));
+      }
     } catch (err) {
       if (requestId === requestIdRef.current) {
+        setSchedules([]);
         setError(err.message || 'Unable to load calendar');
       }
     } finally {
@@ -206,6 +209,7 @@ export default function Calendar() {
 
   const openEdit = (schedule) => {
     if (!isAdmin) return;
+    if (isLeaveSchedule(schedule)) return;
     setEditingSchedule(schedule);
     setConfirmDelete(false);
     setAssignmentsTouched(false);
@@ -255,6 +259,10 @@ export default function Calendar() {
     setError('');
 
     try {
+      if (isLeaveSchedule(editingSchedule)) {
+        throw new Error('Leave schedules are managed by the Leave workflow');
+      }
+
       const { title, startDate, endDate } = validateForm();
       const sourceType = form.job_id ? 'job' : editingSchedule?.source_type === 'leave' ? 'leave' : 'manual';
       const payload = {
@@ -301,6 +309,10 @@ export default function Calendar() {
     setError('');
 
     try {
+      if (isLeaveSchedule(editingSchedule)) {
+        throw new Error('Leave schedules are managed by the Leave workflow');
+      }
+
       await onsiteApi.tables.jobSchedules.delete(editingSchedule.id);
       toast.success('Schedule deleted');
       setShowModal(false);
@@ -318,6 +330,7 @@ export default function Calendar() {
   };
 
   const renderSchedule = (schedule) => {
+    const scheduleIsLeave = isLeaveSchedule(schedule);
     const content = (
       <div className="flex items-start gap-3">
         <div className="w-1.5 self-stretch rounded-full flex-shrink-0" style={{ backgroundColor: schedule.color || '#10B981' }} />
@@ -328,7 +341,7 @@ export default function Calendar() {
               {schedule.job_number && <p className="text-xs text-muted-foreground font-mono">#{schedule.job_number}</p>}
             </div>
             <span className="text-[10px] px-2 py-1 rounded-full bg-secondary text-muted-foreground font-bold uppercase">
-              {schedule.source_type || 'manual'}
+              {scheduleIsLeave ? 'Managed by Leave' : schedule.source_type || 'manual'}
             </span>
           </div>
           <p className="text-xs text-primary font-semibold mt-1">
@@ -352,7 +365,7 @@ export default function Calendar() {
       </div>
     );
 
-    if (!isAdmin) {
+    if (!isAdmin || scheduleIsLeave) {
       return (
         <div key={schedule.id} className="w-full bg-card border border-border rounded-2xl p-4 text-left">
           {content}
@@ -365,6 +378,7 @@ export default function Calendar() {
         key={schedule.id}
         type="button"
         onClick={() => openEdit(schedule)}
+        aria-label={`Edit schedule ${schedule.title || schedule.job_name || schedule.id}`}
         className="w-full bg-card border border-border rounded-2xl p-4 text-left active:scale-[0.99] transition-all"
       >
         {content}
@@ -375,7 +389,7 @@ export default function Calendar() {
   return (
     <div className="min-h-screen bg-background pb-24">
       <div className="px-6 pt-14 pb-4 flex items-center gap-4">
-        <Link to="/" className="w-9 h-9 rounded-xl bg-secondary flex items-center justify-center">
+        <Link to="/" aria-label="Back" className="w-9 h-9 rounded-xl bg-secondary flex items-center justify-center">
           <ChevronLeft className="w-5 h-5" />
         </Link>
         <div className="flex-1 min-w-0">
@@ -387,12 +401,18 @@ export default function Calendar() {
           type="button"
           onClick={loadCalendar}
           disabled={loading}
+          aria-label="Refresh calendar"
           className="w-9 h-9 rounded-xl bg-secondary flex items-center justify-center disabled:opacity-60"
         >
           <RefreshCcw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
         </button>
         {isAdmin && (
-          <button type="button" onClick={openAdd} className="w-9 h-9 rounded-xl bg-primary flex items-center justify-center">
+          <button
+            type="button"
+            onClick={openAdd}
+            aria-label="Add schedule"
+            className="w-9 h-9 rounded-xl bg-primary flex items-center justify-center"
+          >
             <Plus className="w-5 h-5 text-primary-foreground" />
           </button>
         )}
@@ -453,17 +473,21 @@ export default function Calendar() {
       {showModal && createPortal(
         <div className="fixed inset-0 z-[9999] bg-black/60 flex items-end justify-center" onClick={() => !saving && setShowModal(false)}>
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="calendar-schedule-dialog-title"
             className="bg-card border border-border rounded-t-3xl w-full max-w-lg p-6 space-y-4 max-h-[92vh] overflow-y-auto"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex items-center justify-between">
               <div>
-                <h2 className="text-lg font-black">{editingSchedule ? 'Edit Schedule' : 'Add Schedule'}</h2>
+                <h2 id="calendar-schedule-dialog-title" className="text-lg font-black">{editingSchedule ? 'Edit Schedule' : 'Add Schedule'}</h2>
                 <p className="text-xs text-muted-foreground">Dates stay as calendar-only values</p>
               </div>
               <button
                 type="button"
                 onClick={() => !saving && setShowModal(false)}
+                aria-label="Close modal"
                 className="w-8 h-8 rounded-xl bg-secondary flex items-center justify-center"
               >
                 <X className="w-4 h-4" />
@@ -541,6 +565,7 @@ export default function Calendar() {
                           key={worker.user_id}
                           type="button"
                           onClick={() => toggleWorker(worker.user_id)}
+                          aria-pressed={isSelected}
                           className={`w-full min-h-[52px] rounded-2xl border px-3 py-2 text-left flex items-center gap-3 transition-all ${
                             isSelected
                               ? 'border-primary bg-primary/10 text-foreground'
@@ -575,6 +600,8 @@ export default function Calendar() {
                       key={color}
                       type="button"
                       onClick={() => setForm((current) => ({ ...current, color }))}
+                      aria-label={`Choose colour ${color}`}
+                      aria-pressed={form.color === color}
                       className={`w-8 h-8 rounded-full border-2 transition-all ${form.color === color ? 'border-white scale-110' : 'border-transparent'}`}
                       style={{ backgroundColor: color }}
                     />
@@ -608,6 +635,7 @@ export default function Calendar() {
                     type="button"
                     onClick={handleDelete}
                     disabled={saving}
+                    aria-label="Confirm delete schedule"
                     className="px-4 py-3 rounded-2xl bg-destructive text-destructive-foreground font-bold text-sm disabled:opacity-60"
                   >
                     {saving ? 'Deleting...' : 'Confirm'}
@@ -617,6 +645,7 @@ export default function Calendar() {
                     type="button"
                     onClick={() => setConfirmDelete(true)}
                     disabled={saving}
+                    aria-label="Delete schedule"
                     className="px-4 py-3 rounded-2xl bg-destructive/15 border border-destructive/30 text-destructive font-bold text-sm disabled:opacity-60"
                   >
                     <Trash2 className="w-4 h-4" />

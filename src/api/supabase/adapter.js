@@ -236,6 +236,45 @@ const createTableAdapter = (tableName) => ({
   },
 });
 
+const normalizeWorkerDirectoryName = (value) => {
+  const trimmed = optionalId(value);
+  return trimmed || null;
+};
+
+const mapCompanyWorkerDirectoryEntry = (entry = {}) => {
+  const fullName = normalizeWorkerDirectoryName(entry.full_name);
+  const email = normalizeWorkerDirectoryName(entry.email);
+  const userId = entry.user_id;
+
+  return {
+    user_id: userId,
+    role: entry.role,
+    full_name: fullName,
+    email,
+    display_name:
+      normalizeWorkerDirectoryName(entry.display_name) ||
+      fullName ||
+      email ||
+      `Worker • ${String(userId || 'unknown').slice(0, 8)}`,
+  };
+};
+
+const createCompanyMembersAdapter = () => ({
+  ...createTableAdapter('company_members'),
+
+  async directory(companyId) {
+    const normalizedCompanyId = optionalId(companyId);
+    if (!normalizedCompanyId) throw new Error('companyId is required');
+    if (!UUID_PATTERN.test(normalizedCompanyId)) throw new Error('companyId must be a company UUID');
+
+    const { data, error } = await supabase.rpc('list_company_worker_directory', {
+      p_company_id: normalizedCompanyId,
+    });
+    if (error) throw error;
+    return (data || []).map(mapCompanyWorkerDirectoryEntry);
+  },
+});
+
 const createJobSchedulesAdapter = () => ({
   async list(orderBy = 'start_date', limit) {
     let query = supabase
@@ -363,7 +402,7 @@ export const onsiteApi = {
 
   tables: {
     companies: createTableAdapter('companies'),
-    companyMembers: createTableAdapter('company_members'),
+    companyMembers: createCompanyMembersAdapter(),
     jobs: createTableAdapter('jobs'),
     timeEntries: createTableAdapter('time_entries'),
     equipment: createTableAdapter('equipment'),

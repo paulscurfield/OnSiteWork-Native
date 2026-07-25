@@ -1,4 +1,3 @@
-import * as React from "react"
 import { cva } from "class-variance-authority";
 
 import { cn } from "@/lib/utils"
@@ -23,6 +22,14 @@ const badgeVariants = cva(
   }
 )
 
+/**
+ * @typedef {"default" | "secondary" | "destructive" | "outline"} BadgeVariant
+ * @typedef {import('react').HTMLAttributes<HTMLDivElement> & {
+ *   variant?: BadgeVariant
+ * }} BadgeProps
+ */
+
+/** @param {BadgeProps} props */
 function Badge({
   className,
   variant,

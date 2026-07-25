@@ -18,7 +18,8 @@ function MapRecenter({ position }) {
 }
 
 // Fix leaflet default marker
-delete L.Icon.Default.prototype._getIconUrl;
+const defaultIconPrototype = /** @type {L.Icon.Default & { _getIconUrl?: unknown }} */ (L.Icon.Default.prototype);
+delete defaultIconPrototype._getIconUrl;
 L.Icon.Default.mergeOptions({
   iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
   iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',

@@ -13,7 +13,8 @@ import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 
 // Fix leaflet default marker icon
-delete L.Icon.Default.prototype._getIconUrl;
+const defaultIconPrototype = /** @type {L.Icon.Default & { _getIconUrl?: unknown }} */ (L.Icon.Default.prototype);
+delete defaultIconPrototype._getIconUrl;
 L.Icon.Default.mergeOptions({
   iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
   iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
@@ -119,6 +120,7 @@ export default function ClockScreen() {
     );
   }
 
+  /** @type {import('leaflet').LatLngExpression} */
   const mapCenter = job?.location_lat && job?.location_lng 
     ? [job.location_lat, job.location_lng]
     : userPos ? [userPos.lat, userPos.lng] : [-33.8688, 151.2093];

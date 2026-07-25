@@ -8,7 +8,8 @@ import { format, parseISO } from 'date-fns';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 
-delete L.Icon.Default.prototype._getIconUrl;
+const defaultIconPrototype = /** @type {L.Icon.Default & { _getIconUrl?: unknown }} */ (L.Icon.Default.prototype);
+delete defaultIconPrototype._getIconUrl;
 L.Icon.Default.mergeOptions({
   iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
   iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
@@ -69,6 +70,7 @@ export default function TeamMap() {
 
   // Workers currently clocked in with GPS for map markers
   const workersWithLocation = todayEntries.filter(e => e.status === 'active' && e.worker_lat && e.worker_lng);
+  /** @type {import('leaflet').LatLngExpression} */
   const mapCenter = workersWithLocation.length > 0
     ? [workersWithLocation[0].worker_lat, workersWithLocation[0].worker_lng]
     : [-33.8688, 151.2093];

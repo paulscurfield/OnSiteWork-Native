@@ -23,6 +23,16 @@ const statusConfig = {
   maintenance: { label: 'Maintenance', color: 'text-rose-400', bg: 'bg-rose-500/15 border-rose-500/25' },
 };
 
+/**
+ * @typedef {{
+ *   name: string,
+ *   equipment_id: string,
+ *   category: string,
+ *   status: string,
+ *   notes: string
+ * }} EquipmentEditForm
+ */
+
 export default function Equipment() {
   const { company } = useCompany();
   const navigate = useNavigate();
@@ -33,7 +43,7 @@ export default function Equipment() {
   const [filter, setFilter] = useState('all');
   const [actionLoading, setActionLoading] = useState(null);
   const [editItem, setEditItem] = useState(null);
-  const [editForm, setEditForm] = useState({});
+  const [editForm, setEditForm] = useState(/** @type {EquipmentEditForm} */ ({}));
   const [editSaving, setEditSaving] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [addForm, setAddForm] = useState({ name: '', equipment_id: '', category: 'tools', status: 'available', notes: '' });

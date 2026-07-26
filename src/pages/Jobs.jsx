@@ -12,13 +12,23 @@ const statusColors = {
   on_hold: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
 };
 
+/**
+ * @typedef {{
+ *   job_name: string,
+ *   job_number: string,
+ *   location_address: string,
+ *   status: string,
+ *   notes: string
+ * }} JobEditForm
+ */
+
 export default function Jobs() {
   const { company } = useCompany();
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [editJob, setEditJob] = useState(null);
-  const [editForm, setEditForm] = useState({});
+  const [editForm, setEditForm] = useState(/** @type {JobEditForm} */ ({}));
   const [editSaving, setEditSaving] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [addForm, setAddForm] = useState({ job_name: '', job_number: '', location_address: '', notes: '' });

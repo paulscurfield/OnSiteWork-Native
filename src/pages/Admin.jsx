@@ -409,7 +409,7 @@ OnSite Timesheet`;
     const finishISO = addDayForm.finish_time ? `${addDayForm.date}T${addDayForm.finish_time}:00` : null;
     let totalHoursCalc = 0;
     if (!isLeaveEntry && finishISO) {
-      const rawHours = (new Date(finishISO) - new Date(startISO)) / 3600000;
+      const rawHours = (new Date(finishISO).getTime() - new Date(startISO).getTime()) / 3600000;
       totalHoursCalc = Math.round((rawHours - (addDayForm.lunch_break_mins || 0) / 60) * 100) / 100;
     }
     const leaveLabel = isSickDay ? 'Sick Day' : 'Annual Leave';
@@ -454,7 +454,7 @@ OnSite Timesheet`;
     const finishISO = editForm.finish_time ? `${dateStr}T${editForm.finish_time}:00` : null;
     let totalHoursCalc = editEntry.total_hours;
     if (startISO && finishISO) {
-      const rawHours = (new Date(finishISO) - new Date(startISO)) / 3600000;
+      const rawHours = (new Date(finishISO).getTime() - new Date(startISO).getTime()) / 3600000;
       totalHoursCalc = Math.round((rawHours - (editForm.lunch_break_mins || 0) / 60) * 100) / 100;
     }
     const job = jobs.find(j => j.id === editForm.job_id);

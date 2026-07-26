@@ -9,6 +9,17 @@ import { toast } from 'sonner';
 
 const tabs = ['Jobs', 'Timesheets', 'Workers', 'Photos', 'Pre-Starts'];
 
+/**
+ * @typedef {{
+ *   job_id: string,
+ *   date: string,
+ *   start_time: string,
+ *   finish_time: string,
+ *   lunch_break_mins: number,
+ *   notes: string
+ * }} AdminEditEntryForm
+ */
+
 export default function Admin() {
   const { company } = useCompany();
   const [user, setUser] = useState(null);
@@ -36,7 +47,7 @@ export default function Admin() {
   const [showMyobPickerModal, setShowMyobPickerModal] = useState(false);
   const [selectedWorkerEmails, setSelectedWorkerEmails] = useState([]);
   const [editEntry, setEditEntry] = useState(null);
-  const [editForm, setEditForm] = useState({});
+  const [editForm, setEditForm] = useState(/** @type {AdminEditEntryForm} */ ({}));
   const [editSaving, setEditSaving] = useState(false);
   const [photos, setPhotos] = useState([]);
   const [photoFilter, setPhotoFilter] = useState('');

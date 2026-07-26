@@ -20,6 +20,14 @@ const tabs = ['Jobs', 'Timesheets', 'Workers', 'Photos', 'Pre-Starts'];
  * }} AdminEditEntryForm
  */
 
+/**
+ * @typedef {{
+ *   users: {
+ *     inviteUser(user_email: string, role: string): Promise<unknown>
+ *   }
+ * }} Base44UsersCompatibility
+ */
+
 export default function Admin() {
   const { company } = useCompany();
   const [user, setUser] = useState(null);
@@ -498,7 +506,7 @@ OnSite Timesheet`;
   const handleInviteWorker = async () => {
     if (!inviteEmail) { toast.error('Enter an email address'); return; }
     setInviting(true);
-    await base44.users.inviteUser(inviteEmail, inviteRole);
+    await (/** @type {typeof base44 & Base44UsersCompatibility} */ (base44)).users.inviteUser(inviteEmail, inviteRole);
     toast.success(`Invite sent to ${inviteEmail}`);
     setInviteEmail('');
     setInviteRole('user');

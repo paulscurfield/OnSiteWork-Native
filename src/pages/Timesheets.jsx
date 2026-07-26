@@ -87,7 +87,7 @@ export default function Timesheets() {
 
     let totalHours = 0;
     if (!isLeave && startISO && finishISO) {
-      const rawHours = (new Date(finishISO) - new Date(startISO)) / 3600000;
+      const rawHours = (new Date(finishISO).getTime() - new Date(startISO).getTime()) / 3600000;
       totalHours = Math.round((rawHours - (form.lunch_break_mins || 0) / 60) * 100) / 100;
     }
 

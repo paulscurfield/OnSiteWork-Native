@@ -73,7 +73,7 @@ export default function Dashboard() {
     if (!activeEntry) return;
     setClockingOut(true);
     const finishTime = new Date().toISOString();
-    const rawHours = (new Date(finishTime) - new Date(activeEntry.start_time)) / 3600000;
+    const rawHours = (new Date(finishTime).getTime() - new Date(activeEntry.start_time).getTime()) / 3600000;
     const totalHours = Math.round((rawHours - (activeEntry.lunch_break_mins || 0) / 60) * 100) / 100;
     await base44.entities.TimeEntry.update(activeEntry.id, {
       finish_time: finishTime,
@@ -89,7 +89,7 @@ export default function Dashboard() {
   const getElapsed = () => {
     if (!activeEntry?.start_time) return '';
     const start = new Date(activeEntry.start_time);
-    const diff = Math.floor((currentTime - start) / 1000);
+    const diff = Math.floor((currentTime.getTime() - start.getTime()) / 1000);
     const h = Math.floor(diff / 3600);
     const m = Math.floor((diff % 3600) / 60);
     const s = diff % 60;

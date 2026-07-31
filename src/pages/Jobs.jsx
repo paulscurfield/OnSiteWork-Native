@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { base44 } from '@/api/base44Client';
+import { onsiteApi } from '@/api/supabase/adapter';
 import { useCompany } from '@/lib/companyContext';
 import { Link } from 'react-router-dom';
 import { Briefcase, MapPin, ChevronLeft, ChevronRight, Search, Trash2, Pencil, X, Navigation, Plus, Check } from 'lucide-react';
@@ -10,6 +11,21 @@ const statusColors = {
   active: 'bg-green-500/20 text-green-400 border-green-500/30',
   completed: 'bg-muted text-muted-foreground border-border',
   on_hold: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
+};
+
+const resolveSupabaseCompany = (profile, companyRows) => {
+  if (!profile?.id) {
+    throw new Error('Not authenticated with Supabase');
+  }
+
+  if (companyRows.length === 0) {
+    throw new Error('No Supabase company found for this user');
+  }
+  if (companyRows.length > 1) {
+    throw new Error('Multiple Supabase companies found. A company selector is required before Jobs can load safely.');
+  }
+
+  return companyRows[0];
 };
 
 /**
@@ -24,6 +40,7 @@ const statusColors = {
 
 export default function Jobs() {
   const { company } = useCompany();
+  const requestIdRef = useRef(0);
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -36,10 +53,42 @@ export default function Jobs() {
 
   useEffect(() => {
     if (!company) return;
-    base44.entities.Job.filter({ company_id: company.id }, '-created_date').then(data => {
-      setJobs(data);
-      setLoading(false);
-    });
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    setLoading(true);
+
+    const loadJobs = async () => {
+      try {
+        const [profile, companyRows] = await Promise.all([
+          onsiteApi.auth.me(),
+          onsiteApi.tables.companies.list('name'),
+        ]);
+        if (requestId !== requestIdRef.current) return;
+
+        const resolvedSupabaseCompany = resolveSupabaseCompany(profile, companyRows);
+        const data = await onsiteApi.tables.jobs.filter(
+          { company_id: resolvedSupabaseCompany.id },
+          '-created_date'
+        );
+        if (requestId !== requestIdRef.current) return;
+
+        setJobs(data);
+      } catch (error) {
+        if (requestId === requestIdRef.current) {
+          console.error('Failed to load Supabase jobs:', error);
+          setJobs([]);
+        }
+      } finally {
+        if (requestId === requestIdRef.current) {
+          setLoading(false);
+        }
+      }
+    };
+
+    loadJobs();
+    return () => {
+      requestIdRef.current += 1;
+    };
   }, [company]);
 
   const handleDelete = async (e, jobId) => {

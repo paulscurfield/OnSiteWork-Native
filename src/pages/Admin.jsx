@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { base44 } from '@/api/base44Client';
+import { onsiteApi } from '@/api/supabase/adapter';
 import { useCompany } from '@/lib/companyContext';
 import { Link } from 'react-router-dom';
 import { ChevronLeft, Plus, Pencil, Trash2, Download, Users, Clock, X, Check, MapPin, FileText, UserPlus, Mail, Loader2, Camera, AlertTriangle } from 'lucide-react';
@@ -8,6 +9,21 @@ import { format, parseISO, startOfWeek, addDays } from 'date-fns';
 import { toast } from 'sonner';
 
 const tabs = ['Jobs', 'Timesheets', 'Workers', 'Photos', 'Pre-Starts'];
+
+const resolveSupabaseCompany = (profile, companyRows) => {
+  if (!profile?.id) {
+    throw new Error('Not authenticated with Supabase');
+  }
+
+  if (companyRows.length === 0) {
+    throw new Error('No Supabase company found for this user');
+  }
+  if (companyRows.length > 1) {
+    throw new Error('Multiple Supabase companies found. A company selector is required before Admin Jobs can load safely.');
+  }
+
+  return companyRows[0];
+};
 
 /**
  * @typedef {{
@@ -30,15 +46,19 @@ const tabs = ['Jobs', 'Timesheets', 'Workers', 'Photos', 'Pre-Starts'];
 
 export default function Admin() {
   const { company } = useCompany();
+  const adminJobsRequestIdRef = useRef(0);
   const [user, setUser] = useState(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [activeTab, setActiveTab] = useState('Jobs');
+  const [supabaseCompany, setSupabaseCompany] = useState(null);
   const [adminJobs, setAdminJobs] = useState([]);
   const [timeEntryJobs, setTimeEntryJobs] = useState([]);
   const [entries, setEntries] = useState([]);
   const [users, setUsers] = useState([]);
   const [showJobModal, setShowJobModal] = useState(false);
   const [editJob, setEditJob] = useState(null);
+  const [jobSaving, setJobSaving] = useState(false);
+  const [deleteSavingId, setDeleteSavingId] = useState(null);
   const [weekStart, setWeekStart] = useState(startOfWeek(new Date(), { weekStartsOn: 4 }));
   const [jobForm, setJobForm] = useState({ job_name: '', job_number: '', location_address: '', latitude: '', longitude: '', notes: '', status: 'active' });
   const [showInviteModal, setShowInviteModal] = useState(false);
@@ -203,13 +223,47 @@ OnSite Timesheet`;
     setPreStarts(all);
   };
 
+  const resolveAdminSupabaseCompany = async () => {
+    const [profile, companyRows] = await Promise.all([
+      onsiteApi.auth.me(),
+      onsiteApi.tables.companies.list('name'),
+    ]);
+    return resolveSupabaseCompany(profile, companyRows);
+  };
+
+  const loadAdminJobs = async () => {
+    const requestId = adminJobsRequestIdRef.current + 1;
+    adminJobsRequestIdRef.current = requestId;
+
+    try {
+      const resolvedCompany = await resolveAdminSupabaseCompany();
+      const jobs = await onsiteApi.tables.jobs.filter(
+        { company_id: resolvedCompany.id },
+        '-created_date'
+      );
+      if (requestId !== adminJobsRequestIdRef.current) return null;
+
+      setSupabaseCompany(resolvedCompany);
+      setAdminJobs(jobs);
+      return resolvedCompany;
+    } catch (error) {
+      if (requestId === adminJobsRequestIdRef.current) {
+        console.error('Failed to load Supabase admin jobs:', error);
+        setSupabaseCompany(null);
+        setAdminJobs([]);
+      }
+      return null;
+    }
+  };
+
   const loadAll = async () => {
+    const adminJobsLoad = loadAdminJobs();
     const [j, allEntries, usersRes] = await Promise.all([
       base44.entities.Job.filter({ company_id: company?.id }, '-created_date'),
       base44.entities.TimeEntry.filter({ company_id: company?.id }, '-date', 500),
       base44.functions.invoke('getCompanyUsers', {}),
     ]);
-    setAdminJobs(j);
+    await adminJobsLoad;
     setTimeEntryJobs(j);
 
     // Build worker map - start with actual registered company users
@@ -263,26 +317,64 @@ OnSite Timesheet`;
   };
 
   const handleSaveJob = async () => {
-    const data = {
-      ...jobForm,
-      latitude: jobForm.latitude ? parseFloat(jobForm.latitude) : null,
-      longitude: jobForm.longitude ? parseFloat(jobForm.longitude) : null,
-    };
-    if (editJob) {
-      await base44.entities.Job.update(editJob.id, data);
-      toast.success('Job updated!');
-    } else {
-      await base44.entities.Job.create({ ...data, company_id: company?.id });
-      toast.success('Job created!');
+    if (jobSaving) return;
+    setJobSaving(true);
+    try {
+      const parseCoordinate = (value, label) => {
+        if (value === undefined || value === null || String(value).trim() === '') return null;
+        const numberValue = Number(value);
+        if (!Number.isFinite(numberValue)) {
+          throw new Error(`${label} must be a valid number`);
+        }
+        return numberValue;
+      };
+      const data = {
+        ...jobForm,
+        latitude: parseCoordinate(jobForm.latitude, 'Latitude'),
+        longitude: parseCoordinate(jobForm.longitude, 'Longitude'),
+      };
+
+      if (editJob) {
+        const updatedJob = await onsiteApi.tables.jobs.update(editJob.id, data);
+        setAdminJobs(currentJobs =>
+          currentJobs.map(job => job.id === editJob.id ? updatedJob : job)
+        );
+        toast.success('Job updated!');
+      } else {
+        const resolvedCompany = await resolveAdminSupabaseCompany();
+        setSupabaseCompany(resolvedCompany);
+        const createdJob = await onsiteApi.tables.jobs.create({
+          ...data,
+          company_id: resolvedCompany.id,
+        });
+        setAdminJobs(currentJobs => [createdJob, ...currentJobs]);
+        toast.success('Job created!');
+      }
+      setShowJobModal(false);
+    } catch (error) {
+      console.error('Failed to save Supabase admin job:', error);
+      const message = error instanceof Error && /^(Latitude|Longitude) must be a valid number$/.test(error.message)
+        ? error.message
+        : (editJob ? 'Failed to update job' : 'Failed to create job');
+      toast.error(message);
+    } finally {
+      setJobSaving(false);
     }
-    setShowJobModal(false);
-    loadAll();
   };
 
   const handleDeleteJob = async (id) => {
-    await base44.entities.Job.delete(id);
-    toast.success('Job deleted');
-    loadAll();
+    if (deleteSavingId) return;
+    setDeleteSavingId(id);
+    try {
+      await onsiteApi.tables.jobs.delete(id);
+      setAdminJobs(currentJobs => currentJobs.filter(job => job.id !== id));
+      toast.success('Job deleted');
+    } catch (error) {
+      console.error('Failed to delete Supabase admin job:', error);
+      toast.error('Failed to delete job');
+    } finally {
+      setDeleteSavingId(null);
+    }
   };
 
   const exportCSV = () => {
@@ -582,7 +674,11 @@ OnSite Timesheet`;
                     <button onClick={() => openEditJob(job)} className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center">
                       <Pencil className="w-3.5 h-3.5 text-muted-foreground" />
                     </button>
-                    <button onClick={() => handleDeleteJob(job.id)} className="w-8 h-8 rounded-lg bg-destructive/10 flex items-center justify-center">
+                    <button
+                      onClick={() => handleDeleteJob(job.id)}
+                      disabled={deleteSavingId === job.id}
+                      className="w-8 h-8 rounded-lg bg-destructive/10 flex items-center justify-center disabled:opacity-60"
+                    >
                       <Trash2 className="w-3.5 h-3.5 text-destructive" />
                     </button>
                   </div>
@@ -1380,9 +1476,13 @@ OnSite Timesheet`;
                 </select>
               </div>
             </div>
-            <button onClick={handleSaveJob} className="w-full mt-6 py-4 rounded-2xl bg-primary text-primary-foreground font-bold flex items-center justify-center gap-2">
+            <button
+              onClick={handleSaveJob}
+              disabled={jobSaving}
+              className="w-full mt-6 py-4 rounded-2xl bg-primary text-primary-foreground font-bold flex items-center justify-center gap-2 disabled:opacity-60"
+            >
               <Check className="w-5 h-5" />
-              {editJob ? 'Save Changes' : 'Create Job Site'}
+              {jobSaving ? 'Saving...' : (editJob ? 'Save Changes' : 'Create Job Site')}
             </button>
           </div>
         </div>

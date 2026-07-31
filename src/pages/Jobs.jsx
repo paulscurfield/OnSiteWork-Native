@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { base44 } from '@/api/base44Client';
 import { onsiteApi } from '@/api/supabase/adapter';
 import { useCompany } from '@/lib/companyContext';
 import { Link } from 'react-router-dom';
@@ -51,6 +50,7 @@ export default function Jobs() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [addForm, setAddForm] = useState({ job_name: '', job_number: '', location_address: '', notes: '' });
   const [addSaving, setAddSaving] = useState(false);
+  const [deleteSavingId, setDeleteSavingId] = useState(null);
 
   useEffect(() => {
     if (!company) return;
@@ -98,9 +98,17 @@ export default function Jobs() {
   const handleDelete = async (e, jobId) => {
     e.preventDefault();
     e.stopPropagation();
-    await base44.entities.Job.delete(jobId);
-    setJobs(jobs.filter(j => j.id !== jobId));
-    toast.success('Job deleted');
+    setDeleteSavingId(jobId);
+    try {
+      await onsiteApi.tables.jobs.delete(jobId);
+      setJobs(currentJobs => currentJobs.filter(j => j.id !== jobId));
+      toast.success('Job deleted');
+    } catch (error) {
+      console.error('Failed to delete Supabase job:', error);
+      toast.error('Failed to delete job');
+    } finally {
+      setDeleteSavingId(null);
+    }
   };
 
   const openEdit = (e, job) => {
@@ -352,7 +360,7 @@ export default function Jobs() {
                   className="w-8 h-8 rounded-xl bg-secondary flex items-center justify-center hover:bg-primary/20 transition-colors">
                   <Pencil className="w-4 h-4 text-muted-foreground" />
                 </button>
-                <button onClick={(e) => handleDelete(e, job.id)}
+                <button onClick={(e) => handleDelete(e, job.id)} disabled={deleteSavingId === job.id}
                   className="w-8 h-8 rounded-xl bg-destructive/10 flex items-center justify-center hover:bg-destructive/20 transition-colors">
                   <Trash2 className="w-4 h-4 text-destructive" />
                 </button>

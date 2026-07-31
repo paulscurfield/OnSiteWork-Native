@@ -41,6 +41,7 @@ const resolveSupabaseCompany = (profile, companyRows) => {
 export default function Jobs() {
   const { company } = useCompany();
   const requestIdRef = useRef(0);
+  const [supabaseCompany, setSupabaseCompany] = useState(null);
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -56,6 +57,7 @@ export default function Jobs() {
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
     setLoading(true);
+    setSupabaseCompany(null);
 
     const loadJobs = async () => {
       try {
@@ -72,10 +74,12 @@ export default function Jobs() {
         );
         if (requestId !== requestIdRef.current) return;
 
+        setSupabaseCompany(resolvedSupabaseCompany);
         setJobs(data);
       } catch (error) {
         if (requestId === requestIdRef.current) {
           console.error('Failed to load Supabase jobs:', error);
+          setSupabaseCompany(null);
           setJobs([]);
         }
       } finally {
@@ -114,22 +118,52 @@ export default function Jobs() {
 
   const handleEditSave = async () => {
     setEditSaving(true);
-    await base44.entities.Job.update(editJob.id, editForm);
-    setJobs(jobs.map(j => j.id === editJob.id ? { ...j, ...editForm } : j));
-    toast.success('Job updated');
-    setEditJob(null);
-    setEditSaving(false);
+    try {
+      const updatedJob = await onsiteApi.tables.jobs.update(editJob.id, {
+        job_name: editForm.job_name,
+        job_number: editForm.job_number,
+        location_address: editForm.location_address,
+        status: editForm.status,
+        notes: editForm.notes,
+      });
+      setJobs(currentJobs =>
+        currentJobs.map(j => j.id === editJob.id ? updatedJob : j)
+      );
+      toast.success('Job updated');
+      setEditJob(null);
+    } catch (error) {
+      console.error('Failed to update Supabase job:', error);
+      toast.error('Failed to update job');
+    } finally {
+      setEditSaving(false);
+    }
   };
 
   const handleAddJob = async () => {
     if (!addForm.job_name || !addForm.job_number) { toast.error('Job name and number are required'); return; }
+    if (!supabaseCompany?.id) { toast.error('Supabase company is not ready yet'); return; }
     setAddSaving(true);
-    const newJob = await base44.entities.Job.create({ ...addForm, company_id: company?.id, status: 'active' });
-    setJobs([newJob, ...jobs]);
-    toast.success('Job added!');
-    setShowAddModal(false);
-    setAddForm({ job_name: '', job_number: '', location_address: '', notes: '' });
-    setAddSaving(false);
+    try {
+      const newJob = await onsiteApi.tables.jobs.create({
+        company_id: supabaseCompany.id,
+        job_name: addForm.job_name,
+        job_number: addForm.job_number,
+        location_address: addForm.location_address,
+        latitude: null,
+        longitude: null,
+        notes: addForm.notes,
+        status: 'active',
+      });
+      setJobs(currentJobs => [newJob, ...currentJobs]);
+      toast.success('Job added!');
+      setShowAddModal(false);
+      setAddForm({ job_name: '', job_number: '', location_address: '', notes: '' });
+    } catch (error) {
+      console.error('Failed to create Supabase job:', error);
+      toast.error('Failed to add job');
+    } finally {
+      setAddSaving(false);
+    }
   };
 
   const filtered = jobs.filter(j =>

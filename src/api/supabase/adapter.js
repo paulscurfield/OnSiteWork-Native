@@ -18,6 +18,7 @@ const applyFilters = (query, filters = {}) => {
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+const JOB_STATUS_VALUES = new Set(['active', 'completed', 'on_hold']);
 
 const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 
@@ -53,6 +54,99 @@ const optionalId = (value) => {
   if (value === undefined || value === null) return null;
   const trimmed = String(value).trim();
   return trimmed || null;
+};
+
+const optionalText = (value) => {
+  if (value === undefined) return undefined;
+  return optionalId(value);
+};
+
+const requiredText = (value, fieldName) => {
+  const trimmed = optionalId(value);
+  if (!trimmed) throw new Error(`${fieldName} is required`);
+  return trimmed;
+};
+
+const optionalNumber = (value, fieldName) => {
+  if (value === undefined) return undefined;
+  if (value === null || String(value).trim() === '') return null;
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) throw new Error(`${fieldName} must be a valid number`);
+  return numberValue;
+};
+
+const normalizeJobStatus = (value, fallback) => {
+  if (value === undefined || value === null || String(value).trim() === '') {
+    if (fallback !== undefined) return fallback;
+    throw new Error('Job status must be active, completed, or on_hold');
+  }
+  const status = String(value).trim();
+  if (!JOB_STATUS_VALUES.has(status)) {
+    throw new Error('Job status must be active, completed, or on_hold');
+  }
+  return status;
+};
+
+const normalizeJobsOrderBy = (orderBy) => {
+  if (!orderBy) return orderBy;
+  const descending = orderBy.startsWith('-');
+  const column = descending ? orderBy.slice(1) : orderBy;
+  const mappedColumn = column === 'created_date'
+    ? 'created_at'
+    : column === 'updated_date'
+      ? 'updated_at'
+      : column;
+  return `${descending ? '-' : ''}${mappedColumn}`;
+};
+
+const mapJobRow = (job = {}) => ({
+  ...job,
+  created_date: job.created_date ?? job.created_at,
+  updated_date: job.updated_date ?? job.updated_at,
+});
+
+const normalizeJobCreateValues = (values = {}) => {
+  const companyId = optionalId(values.company_id);
+  if (!companyId) throw new Error('company_id is required');
+
+  return {
+    company_id: companyId,
+    job_name: requiredText(values.job_name, 'job_name'),
+    job_number: requiredText(values.job_number, 'job_number'),
+    location_address: optionalText(values.location_address) ?? null,
+    latitude: optionalNumber(values.latitude, 'latitude') ?? null,
+    longitude: optionalNumber(values.longitude, 'longitude') ?? null,
+    notes: optionalText(values.notes) ?? null,
+    status: normalizeJobStatus(values.status, 'active'),
+  };
+};
+
+const normalizeJobUpdateValues = (values = {}) => {
+  const updateValues = {};
+
+  if (hasOwn(values, 'job_name')) {
+    updateValues.job_name = requiredText(values.job_name, 'job_name');
+  }
+  if (hasOwn(values, 'job_number')) {
+    updateValues.job_number = requiredText(values.job_number, 'job_number');
+  }
+  if (hasOwn(values, 'location_address')) {
+    updateValues.location_address = optionalText(values.location_address) ?? null;
+  }
+  if (hasOwn(values, 'latitude')) {
+    updateValues.latitude = optionalNumber(values.latitude, 'latitude') ?? null;
+  }
+  if (hasOwn(values, 'longitude')) {
+    updateValues.longitude = optionalNumber(values.longitude, 'longitude') ?? null;
+  }
+  if (hasOwn(values, 'notes')) {
+    updateValues.notes = optionalText(values.notes) ?? null;
+  }
+  if (hasOwn(values, 'status')) {
+    updateValues.status = normalizeJobStatus(values.status);
+  }
+
+  return updateValues;
 };
 
 const assignmentUserId = (value) => {
@@ -275,6 +369,57 @@ const createCompanyMembersAdapter = () => ({
   },
 });
 
+const createJobsAdapter = () => ({
+  async list() {
+    throw new Error('Use jobs.filter({ company_id }) so jobs remain company-scoped');
+  },
+
+  async filter(filters = {}, orderBy = '-created_date', limit) {
+    const companyId = optionalId(filters.company_id);
+    if (!companyId) throw new Error('company_id is required when reading jobs');
+
+    let query = supabase.from('jobs').select('*');
+    query = applyFilters(query, { ...filters, company_id: companyId });
+    query = orderQuery(query, normalizeJobsOrderBy(orderBy));
+    if (limit) query = query.limit(limit);
+    const { data, error } = await query;
+    if (error) throw error;
+    return (data || []).map(mapJobRow);
+  },
+
+  async create(values) {
+    const { data, error } = await supabase
+      .from('jobs')
+      .insert(normalizeJobCreateValues(values))
+      .select()
+      .single();
+    if (error) throw error;
+    return mapJobRow(data);
+  },
+
+  async update(id, values) {
+    const updateValues = normalizeJobUpdateValues(values);
+    if (Object.keys(updateValues).length === 0) {
+      throw new Error('No editable job fields supplied');
+    }
+
+    const { data, error } = await supabase
+      .from('jobs')
+      .update(updateValues)
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) throw error;
+    return mapJobRow(data);
+  },
+
+  async delete(id) {
+    const { error } = await supabase.from('jobs').delete().eq('id', id);
+    if (error) throw error;
+    return true;
+  },
+});
+
 const createJobSchedulesAdapter = () => ({
   async list(orderBy = 'start_date', limit) {
     let query = supabase
@@ -407,7 +552,7 @@ export const onsiteApi = {
   tables: {
     companies: createTableAdapter('companies'),
     companyMembers: createCompanyMembersAdapter(),
-    jobs: createTableAdapter('jobs'),
+    jobs: createJobsAdapter(),
     timeEntries: createTableAdapter('time_entries'),
     equipment: createTableAdapter('equipment'),
     equipmentLogs: createTableAdapter('equipment_logs'),

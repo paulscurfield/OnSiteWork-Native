@@ -33,7 +33,8 @@ export default function Admin() {
   const [user, setUser] = useState(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [activeTab, setActiveTab] = useState('Jobs');
-  const [jobs, setJobs] = useState([]);
+  const [adminJobs, setAdminJobs] = useState([]);
+  const [timeEntryJobs, setTimeEntryJobs] = useState([]);
   const [entries, setEntries] = useState([]);
   const [users, setUsers] = useState([]);
   const [showJobModal, setShowJobModal] = useState(false);
@@ -208,7 +209,8 @@ OnSite Timesheet`;
       base44.entities.TimeEntry.filter({ company_id: company?.id }, '-date', 500),
       base44.functions.invoke('getCompanyUsers', {}),
     ]);
-    setJobs(j);
+    setAdminJobs(j);
+    setTimeEntryJobs(j);
 
     // Build worker map - start with actual registered company users
     const workerMap = {};
@@ -412,7 +414,7 @@ OnSite Timesheet`;
     const isSickDay = addDayForm.job_id === 'sick_day';
     const isAnnualLeave = addDayForm.job_id === 'annual_leave';
     const isLeaveEntry = isSickDay || isAnnualLeave;
-    const job = isLeaveEntry ? null : jobs.find(j => j.id === addDayForm.job_id);
+    const job = isLeaveEntry ? null : timeEntryJobs.find(j => j.id === addDayForm.job_id);
     const startISO = addDayForm.start_time ? `${addDayForm.date}T${addDayForm.start_time}:00` : `${addDayForm.date}T00:00:00`;
     const finishISO = addDayForm.finish_time ? `${addDayForm.date}T${addDayForm.finish_time}:00` : null;
     let totalHoursCalc = 0;
@@ -465,7 +467,7 @@ OnSite Timesheet`;
       const rawHours = (new Date(finishISO).getTime() - new Date(startISO).getTime()) / 3600000;
       totalHoursCalc = Math.round((rawHours - (editForm.lunch_break_mins || 0) / 60) * 100) / 100;
     }
-    const job = jobs.find(j => j.id === editForm.job_id);
+    const job = timeEntryJobs.find(j => j.id === editForm.job_id);
     await base44.entities.TimeEntry.update(editEntry.id, {
       job_id: editForm.job_id,
       job_name: job?.job_name || editEntry.job_name,
@@ -556,13 +558,13 @@ OnSite Timesheet`;
       {activeTab === 'Jobs' && (
         <div className="px-6">
           <div className="flex items-center justify-between mb-4">
-            <p className="text-sm text-muted-foreground">{jobs.length} job sites</p>
+            <p className="text-sm text-muted-foreground">{adminJobs.length} job sites</p>
             <button onClick={openAddJob} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-semibold">
               <Plus className="w-4 h-4" /> Add Job
             </button>
           </div>
           <div className="space-y-3">
-            {jobs.map(job => (
+            {adminJobs.map(job => (
               <div key={job.id} className="bg-card border border-border rounded-2xl p-4">
                 <div className="flex items-start justify-between">
                   <div>
@@ -722,7 +724,7 @@ OnSite Timesheet`;
                   <option value="">Select job...</option>
                   <option value="sick_day">🤒 Sick Day</option>
                   <option value="annual_leave">🏖️ Annual Leave</option>
-                  {jobs.map(j => (
+                  {timeEntryJobs.map(j => (
                     <option key={j.id} value={j.id}>{j.job_name} #{j.job_number}</option>
                   ))}
                 </select>
@@ -1093,7 +1095,7 @@ OnSite Timesheet`;
                   onChange={e => setEditForm(f => ({ ...f, job_id: e.target.value }))}
                   className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary">
                   <option value="">Select job...</option>
-                  {jobs.map(j => <option key={j.id} value={j.id}>{j.job_name} #{j.job_number}</option>)}
+                  {timeEntryJobs.map(j => <option key={j.id} value={j.id}>{j.job_name} #{j.job_number}</option>)}
                 </select>
               </div>
               <div>

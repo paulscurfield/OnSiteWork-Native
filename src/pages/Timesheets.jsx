@@ -1,46 +1,154 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useCompany } from '@/lib/companyContext';
-import { base44 } from '@/api/base44Client';
+import { onsiteApi } from '@/api/supabase/adapter';
 import { Link } from 'react-router-dom';
 import { ChevronLeft, ChevronRight, Clock, Plus, Pencil, Trash2, Download, X, Check, FileText, Loader2 } from 'lucide-react';
 import { format, startOfWeek, addDays, isSameDay, parseISO } from 'date-fns';
+import { toast } from 'sonner';
+
+const resolveSupabaseCompany = (profile, companyRows) => {
+  if (!profile?.id) {
+    throw new Error('Not authenticated with Supabase');
+  }
+
+  if (companyRows.length === 0) {
+    throw new Error('No Supabase company found for this user');
+  }
+  if (companyRows.length > 1) {
+    throw new Error('Multiple Supabase companies found. A company selector is required before Timesheets can load safely.');
+  }
+
+  return companyRows[0];
+};
+
+const sortEntries = (items = []) => {
+  return [...items].sort((a, b) => {
+    if (a.date !== b.date) return (a.date || '').localeCompare(b.date || '');
+    const ta = a.start_time ? new Date(a.start_time).getTime() : 0;
+    const tb = b.start_time ? new Date(b.start_time).getTime() : 0;
+    return ta - tb;
+  });
+};
+
+const isEntryInWeek = (entry, weekStart) => {
+  const start = format(weekStart, 'yyyy-MM-dd');
+  const end = format(addDays(weekStart, 6), 'yyyy-MM-dd');
+  return entry.date >= start && entry.date <= end;
+};
+
+const formJobIdFromEntry = (entry) => {
+  if (entry.job_id) return entry.job_id;
+  if (entry.job_name === 'Sick Day') return 'sick_day';
+  if (entry.job_name === 'Annual Leave') return 'annual_leave';
+  return '';
+};
+
+const localDateTimeToIso = (dateString, timeString) => {
+  const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateString || '');
+  const timeMatch = /^(\d{2}):(\d{2})$/.exec(timeString || '');
+  if (!dateMatch || !timeMatch) {
+    throw new Error('Enter a valid date and time');
+  }
+
+  const [, yearText, monthText, dayText] = dateMatch;
+  const [, hourText, minuteText] = timeMatch;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const date = new Date(year, month - 1, day, hour, minute, 0, 0);
+
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day ||
+    date.getHours() !== hour ||
+    date.getMinutes() !== minute
+  ) {
+    throw new Error('Enter a valid local date and time');
+  }
+
+  return date.toISOString();
+};
 
 export default function Timesheets() {
+  const requestIdRef = useRef(0);
   const [user, setUser] = useState(null);
+  const [supabaseCompany, setSupabaseCompany] = useState(null);
   const [entries, setEntries] = useState([]);
   const [jobs, setJobs] = useState([]);
   const [weekStart, setWeekStart] = useState(startOfWeek(new Date(), { weekStartsOn: 4 }));
   const [showAddModal, setShowAddModal] = useState(false);
   const [editEntry, setEditEntry] = useState(null);
   const [form, setForm] = useState({ job_id: '', date: format(new Date(), 'yyyy-MM-dd'), start_time: '', finish_time: '', lunch_break_mins: 0, notes: '' });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [deleteSavingId, setDeleteSavingId] = useState(null);
   const [myobExporting, setMyobExporting] = useState(false);
   const [myobProgress, setMyobProgress] = useState(0);
 
   const { company } = useCompany();
 
   useEffect(() => {
-    base44.auth.me().then(setUser).catch(() => {});
-    if (company) base44.entities.Job.filter({ company_id: company.id }).then(setJobs);
-  }, [company]);
+    if (!company) {
+      setUser(null);
+      setSupabaseCompany(null);
+      setJobs([]);
+      setEntries([]);
+      setLoading(false);
+      return;
+    }
 
-  useEffect(() => {
-    if (user) loadEntries();
-  }, [user, weekStart]);
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    setLoading(true);
+    setEntries([]);
 
-  const loadEntries = async () => {
-    const start = format(weekStart, 'yyyy-MM-dd');
-    const end = format(addDays(weekStart, 6), 'yyyy-MM-dd');
-    const all = await base44.entities.TimeEntry.filter({ company_id: company?.id, worker_email: user.email });
-    const filtered = all
-      .filter(e => e.date >= start && e.date <= end)
-      .sort((a, b) => {
-        if (a.date !== b.date) return a.date.localeCompare(b.date);
-        const ta = a.start_time ? new Date(a.start_time).getTime() : 0;
-        const tb = b.start_time ? new Date(b.start_time).getTime() : 0;
-        return ta - tb;
-      });
-    setEntries(filtered);
-  };
+    const loadTimesheets = async () => {
+      try {
+        const [profile, companyRows] = await Promise.all([
+          onsiteApi.auth.me(),
+          onsiteApi.tables.companies.list('name'),
+        ]);
+        if (requestId !== requestIdRef.current) return;
+
+        const resolvedCompany = resolveSupabaseCompany(profile, companyRows);
+        const [jobRows, timeEntryRows] = await Promise.all([
+          onsiteApi.tables.jobs.filter({ company_id: resolvedCompany.id }),
+          onsiteApi.tables.timeEntries.filter(
+            { company_id: resolvedCompany.id, worker_id: profile.id },
+            '-date'
+          ),
+        ]);
+        if (requestId !== requestIdRef.current) return;
+
+        setUser(profile);
+        setSupabaseCompany(resolvedCompany);
+        setJobs(jobRows);
+        setEntries(sortEntries(timeEntryRows.filter(entry => isEntryInWeek(entry, weekStart))));
+      } catch (error) {
+        if (requestId === requestIdRef.current) {
+          console.error('Failed to load Supabase timesheets:', error);
+          setUser(null);
+          setSupabaseCompany(null);
+          setJobs([]);
+          setEntries([]);
+          toast.error('Failed to load timesheets');
+        }
+      } finally {
+        if (requestId === requestIdRef.current) {
+          setLoading(false);
+        }
+      }
+    };
+
+    loadTimesheets();
+    return () => {
+      requestIdRef.current += 1;
+    };
+  }, [company, weekStart]);
 
   const weekDays = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
 
@@ -66,60 +174,104 @@ export default function Timesheets() {
   const openEdit = (entry) => {
     setEditEntry(entry);
     setForm({
-      job_id: entry.job_id,
+      job_id: formJobIdFromEntry(entry),
       date: entry.date,
       start_time: entry.start_time ? format(parseISO(entry.start_time), "HH:mm") : '',
       finish_time: entry.finish_time ? format(parseISO(entry.finish_time), "HH:mm") : '',
-      lunch_break_mins: entry.lunch_break_mins || 0,
+      lunch_break_mins: entry.lunch_break_mins ?? 0,
       notes: entry.notes || '',
     });
     setShowAddModal(true);
   };
 
   const handleSave = async () => {
+    if (saving) return;
+    if (!supabaseCompany?.id || !user?.id) {
+      toast.error('Supabase timesheets are not ready yet');
+      return;
+    }
+
     const isSickDay = form.job_id === 'sick_day';
     const isAnnualLeave = form.job_id === 'annual_leave';
     const isLeave = isSickDay || isAnnualLeave;
-    const job = isLeave ? null : jobs.find(j => j.id === form.job_id);
-    const dateStr = form.date;
-    const startISO = form.start_time ? `${dateStr}T${form.start_time}:00` : null;
-    const finishISO = form.finish_time ? `${dateStr}T${form.finish_time}:00` : null;
+    const job = form.job_id && !isLeave ? jobs.find(j => j.id === form.job_id) : null;
+    if (form.job_id && !isLeave && !job) {
+      toast.error('Select a valid Supabase job');
+      return;
+    }
 
-    let totalHours = 0;
-    if (!isLeave && startISO && finishISO) {
-      const rawHours = (new Date(finishISO).getTime() - new Date(startISO).getTime()) / 3600000;
-      totalHours = Math.round((rawHours - (form.lunch_break_mins || 0) / 60) * 100) / 100;
+    const dateStr = form.date;
+    let startISO;
+    let finishISO;
+    try {
+      startISO = isLeave
+        ? localDateTimeToIso(dateStr, '00:00')
+        : (form.start_time ? localDateTimeToIso(dateStr, form.start_time) : null);
+      finishISO = !isLeave && form.finish_time ? localDateTimeToIso(dateStr, form.finish_time) : null;
+    } catch (error) {
+      toast.error(error.message || 'Enter valid date and time values');
+      return;
     }
 
     const data = {
-      company_id: company?.id,
-      worker_email: user.email,
-      worker_name: user.full_name,
-      job_id: form.job_id,
+      job_id: isLeave ? null : (job?.id || null),
       job_name: isLeave ? (isSickDay ? 'Sick Day' : 'Annual Leave') : (job?.job_name || ''),
       job_number: isLeave ? '' : (job?.job_number || ''),
       date: dateStr,
-      start_time: isLeave ? `${dateStr}T00:00:00` : startISO,
+      start_time: startISO,
       finish_time: isLeave ? null : finishISO,
-      lunch_break_mins: isLeave ? 0 : (form.lunch_break_mins || 0),
-      total_hours: totalHours,
-      status: 'manual',
+      lunch_break_mins: isLeave ? 0 : (form.lunch_break_mins ?? 0),
       notes: isLeave ? (isSickDay ? '🤒 Sick Day' : '🏖️ Annual Leave') : form.notes,
     };
 
-    if (editEntry) {
-      await base44.entities.TimeEntry.update(editEntry.id, data);
-    } else {
-      await base44.entities.TimeEntry.create(data);
-    }
+    setSaving(true);
+    try {
+      if (editEntry) {
+        const updatedEntry = await onsiteApi.tables.timeEntries.updateManual(editEntry.id, data);
+        setEntries(currentEntries => {
+          const withoutUpdated = currentEntries.filter(entry => entry.id !== updatedEntry.id);
+          return isEntryInWeek(updatedEntry, weekStart)
+            ? sortEntries([...withoutUpdated, updatedEntry])
+            : sortEntries(withoutUpdated);
+        });
+        toast.success('Entry updated');
+      } else {
+        const newEntry = await onsiteApi.tables.timeEntries.createManual({
+          ...data,
+          company_id: supabaseCompany.id,
+          worker_id: user.id,
+        });
+        setEntries(currentEntries =>
+          isEntryInWeek(newEntry, weekStart)
+            ? sortEntries([newEntry, ...currentEntries])
+            : currentEntries
+        );
+        toast.success('Entry added');
+      }
 
-    setShowAddModal(false);
-    loadEntries();
+      setShowAddModal(false);
+      setEditEntry(null);
+    } catch (error) {
+      console.error('Failed to save Supabase timesheet entry:', error);
+      toast.error(error.message || 'Failed to save entry');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleDelete = async (id) => {
-    await base44.entities.TimeEntry.delete(id);
-    loadEntries();
+    if (deleteSavingId) return;
+    setDeleteSavingId(id);
+    try {
+      await onsiteApi.tables.timeEntries.delete(id);
+      setEntries(currentEntries => currentEntries.filter(entry => entry.id !== id));
+      toast.success('Entry deleted');
+    } catch (error) {
+      console.error('Failed to delete Supabase timesheet entry:', error);
+      toast.error(error.message || 'Failed to delete entry');
+    } finally {
+      setDeleteSavingId(null);
+    }
   };
 
   const buildMyobCsv = () => {
@@ -285,8 +437,14 @@ export default function Timesheets() {
                       <button onClick={() => openEdit(entry)} className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center">
                         <Pencil className="w-3.5 h-3.5 text-muted-foreground" />
                       </button>
-                      <button onClick={() => handleDelete(entry.id)} className="w-8 h-8 rounded-lg bg-destructive/10 flex items-center justify-center">
-                        <Trash2 className="w-3.5 h-3.5 text-destructive" />
+                      <button
+                        onClick={() => handleDelete(entry.id)}
+                        disabled={deleteSavingId === entry.id}
+                        className="w-8 h-8 rounded-lg bg-destructive/10 flex items-center justify-center disabled:opacity-50"
+                      >
+                        {deleteSavingId === entry.id
+                          ? <Loader2 className="w-3.5 h-3.5 text-destructive animate-spin" />
+                          : <Trash2 className="w-3.5 h-3.5 text-destructive" />}
                       </button>
                     </div>
                   </div>
@@ -297,7 +455,14 @@ export default function Timesheets() {
           );
         })}
 
-        {entries.filter(e => e.status !== 'active').length === 0 && (
+        {loading && entries.length === 0 && (
+          <div className="text-center py-16">
+            <Loader2 className="w-10 h-10 text-muted-foreground/40 mx-auto mb-3 animate-spin" />
+            <p className="text-muted-foreground">Loading timesheets...</p>
+          </div>
+        )}
+
+        {!loading && entries.filter(e => e.status !== 'active').length === 0 && (
           <div className="text-center py-16">
             <Clock className="w-12 h-12 text-muted-foreground/30 mx-auto mb-3" />
             <p className="text-muted-foreground">No entries this week</p>
@@ -312,7 +477,7 @@ export default function Timesheets() {
           <div className="w-full max-w-md bg-card border-t border-border rounded-t-3xl p-6 pb-8">
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-black">{editEntry ? 'Edit Entry' : 'Add Entry'}</h3>
-              <button onClick={() => setShowAddModal(false)} className="w-8 h-8 rounded-xl bg-muted flex items-center justify-center">
+              <button onClick={() => !saving && setShowAddModal(false)} disabled={saving} className="w-8 h-8 rounded-xl bg-muted flex items-center justify-center disabled:opacity-50">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -363,9 +528,9 @@ export default function Timesheets() {
               </div>
             </div>
 
-            <button onClick={handleSave} className="w-full mt-6 py-4 rounded-2xl bg-primary text-primary-foreground font-bold flex items-center justify-center gap-2">
-              <Check className="w-5 h-5" />
-              Save Entry
+            <button onClick={handleSave} disabled={saving || loading} className="w-full mt-6 py-4 rounded-2xl bg-primary text-primary-foreground font-bold flex items-center justify-center gap-2 disabled:opacity-60">
+              {saving ? <Loader2 className="w-5 h-5 animate-spin" /> : <Check className="w-5 h-5" />}
+              {saving ? 'Saving...' : 'Save Entry'}
             </button>
           </div>
         </div>

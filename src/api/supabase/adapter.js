@@ -56,6 +56,20 @@ const optionalId = (value) => {
   return trimmed || null;
 };
 
+const requiredUuid = (value, fieldName) => {
+  const id = optionalId(value);
+  if (!id) throw new Error(`${fieldName} is required`);
+  if (!UUID_PATTERN.test(id)) throw new Error(`${fieldName} must be a Supabase UUID`);
+  return id;
+};
+
+const optionalUuid = (value, fieldName) => {
+  const id = optionalId(value);
+  if (!id) return null;
+  if (!UUID_PATTERN.test(id)) throw new Error(`${fieldName} must be a Supabase UUID`);
+  return id;
+};
+
 const optionalText = (value) => {
   if (value === undefined) return undefined;
   return optionalId(value);
@@ -73,6 +87,24 @@ const optionalNumber = (value, fieldName) => {
   const numberValue = Number(value);
   if (!Number.isFinite(numberValue)) throw new Error(`${fieldName} must be a valid number`);
   return numberValue;
+};
+
+const optionalTimestamp = (value) => {
+  if (value === undefined || value === null || String(value).trim() === '') return null;
+  return String(value).trim();
+};
+
+const requiredTimestamp = (value, fieldName) => {
+  const timestamp = optionalTimestamp(value);
+  if (!timestamp) throw new Error(`${fieldName} is required`);
+  return timestamp;
+};
+
+const nullableNumberParam = (value, fieldName) => optionalNumber(value, fieldName) ?? null;
+
+const lunchBreakParam = (value) => {
+  if (value === undefined || value === null || String(value).trim() === '') return 0;
+  return optionalNumber(value, 'lunch_break_mins');
 };
 
 const normalizeJobStatus = (value, fallback) => {
@@ -231,6 +263,54 @@ const mapScheduleWithAssignments = (schedule = {}, assignments = []) => {
 const mapRpcScheduleResult = (result) => {
   if (!result?.schedule) return result;
   return mapScheduleWithAssignments(result.schedule, result.assignments);
+};
+
+const mapRpcTimeEntryResult = (result) => {
+  return result?.time_entry ?? null;
+};
+
+const timeEntryClockInParams = (values = {}) => ({
+  p_company_id: requiredUuid(values.company_id, 'company_id'),
+  p_job_id: requiredUuid(values.job_id, 'job_id'),
+  p_date: toDateOnly(values.date, 'date'),
+  p_start_time: requiredTimestamp(values.start_time, 'start_time'),
+  p_worker_lat: nullableNumberParam(values.worker_lat, 'worker_lat'),
+  p_worker_lng: nullableNumberParam(values.worker_lng, 'worker_lng'),
+  p_notes: optionalText(values.notes) ?? null,
+});
+
+const timeEntryClockOutParams = (id, values = {}) => ({
+  p_time_entry_id: requiredUuid(id, 'time_entry_id'),
+  p_finish_time: requiredTimestamp(values.finish_time, 'finish_time'),
+  p_lunch_break_mins: lunchBreakParam(values.lunch_break_mins),
+});
+
+const timeEntryManualJobParams = (values = {}) => {
+  const jobId = optionalUuid(values.job_id, 'job_id');
+
+  return {
+    p_job_id: jobId,
+    p_date: toDateOnly(values.date, 'date'),
+    p_start_time: requiredTimestamp(values.start_time, 'start_time'),
+    p_finish_time: optionalTimestamp(values.finish_time),
+    p_lunch_break_mins: lunchBreakParam(values.lunch_break_mins),
+    p_job_name: jobId ? null : optionalText(values.job_name) ?? null,
+    p_job_number: jobId ? null : optionalText(values.job_number) ?? null,
+    p_notes: optionalText(values.notes) ?? null,
+  };
+};
+
+const timeEntryManualParams = (values = {}) => ({
+  p_company_id: requiredUuid(values.company_id, 'company_id'),
+  p_worker_id: requiredUuid(values.worker_id, 'worker_id'),
+  ...timeEntryManualJobParams(values),
+});
+
+const timeEntryManualUpdateParams = (id, values = {}) => {
+  return {
+    p_time_entry_id: requiredUuid(id, 'time_entry_id'),
+    ...timeEntryManualJobParams(values),
+  };
 };
 
 const scheduleRpcParams = (values = {}) => {
@@ -420,6 +500,66 @@ const createJobsAdapter = () => ({
   },
 });
 
+const createTimeEntriesAdapter = () => {
+  const baseAdapter = createTableAdapter('time_entries');
+
+  return {
+    ...baseAdapter,
+
+    async create() {
+      throw new Error('Use timeEntries.clockIn() or timeEntries.createManual() so TimeEntry writes use secure RPCs');
+    },
+
+    async update() {
+      throw new Error('Use timeEntries.clockOut() or timeEntries.updateManual() so TimeEntry writes use secure RPCs');
+    },
+
+    async getMyActive(companyId) {
+      const { data, error } = await supabase.rpc('get_my_active_time_entry', {
+        p_company_id: requiredUuid(companyId, 'company_id'),
+      });
+      if (error) throw error;
+      return mapRpcTimeEntryResult(data);
+    },
+
+    async clockIn(values) {
+      const { data, error } = await supabase.rpc('clock_in_time_entry', timeEntryClockInParams(values));
+      if (error) throw error;
+      return mapRpcTimeEntryResult(data);
+    },
+
+    async clockOut(id, values) {
+      const { data, error } = await supabase.rpc('clock_out_time_entry', timeEntryClockOutParams(id, values));
+      if (error) throw error;
+      return mapRpcTimeEntryResult(data);
+    },
+
+    async createManual(values) {
+      const { data, error } = await supabase.rpc('create_manual_time_entry', timeEntryManualParams(values));
+      if (error) throw error;
+      return mapRpcTimeEntryResult(data);
+    },
+
+    async updateManual(id, values) {
+      const { data, error } = await supabase.rpc('update_manual_time_entry', timeEntryManualUpdateParams(id, values));
+      if (error) throw error;
+      return mapRpcTimeEntryResult(data);
+    },
+
+    async delete(id) {
+      const timeEntryId = requiredUuid(id, 'time_entry_id');
+      const { data, error } = await supabase.rpc('delete_time_entry', {
+        p_time_entry_id: timeEntryId,
+      });
+      if (error) throw error;
+      return {
+        deleted: Boolean(data?.deleted),
+        id: data?.id ?? timeEntryId,
+      };
+    },
+  };
+};
+
 const createJobSchedulesAdapter = () => ({
   async list(orderBy = 'start_date', limit) {
     let query = supabase
@@ -553,7 +693,7 @@ export const onsiteApi = {
     companies: createTableAdapter('companies'),
     companyMembers: createCompanyMembersAdapter(),
     jobs: createJobsAdapter(),
-    timeEntries: createTableAdapter('time_entries'),
+    timeEntries: createTimeEntriesAdapter(),
     equipment: createTableAdapter('equipment'),
     equipmentLogs: createTableAdapter('equipment_logs'),
     preStarts: createTableAdapter('pre_starts'),

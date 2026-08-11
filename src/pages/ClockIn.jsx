@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { base44 } from '@/api/base44Client';
+import { onsiteApi } from '@/api/supabase/adapter';
 import { useCompany } from '@/lib/companyContext';
 import { MapContainer, TileLayer, Marker, Popup, Circle, useMap } from 'react-leaflet';
 import { ChevronLeft, MapPin, Play, Square, Clock, Navigation } from 'lucide-react';
@@ -8,6 +8,38 @@ import { format } from 'date-fns';
 import { toast } from 'sonner';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
+
+const resolveSupabaseCompany = (profile, companyRows) => {
+  if (!profile?.id) {
+    throw new Error('Not authenticated with Supabase');
+  }
+
+  if (companyRows.length === 0) {
+    throw new Error('No Supabase company found for this user');
+  }
+  if (companyRows.length > 1) {
+    throw new Error('Multiple Supabase companies found. A company selector is required before Clock In can load safely.');
+  }
+
+  return companyRows[0];
+};
+
+const nullableCoordinate = (value) => {
+  if (value === undefined || value === null || String(value).trim() === '') return null;
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : null;
+};
+
+/**
+ * @typedef {{
+ *   id: string,
+ *   job_name?: string | null,
+ *   job_number?: string | null,
+ *   location_address?: string | null,
+ *   latitude?: number | string | null,
+ *   longitude?: number | string | null
+ * }} ClockJob
+ */
 
 function MapRecenter({ position }) {
   const map = useMap();
@@ -30,8 +62,11 @@ export default function ClockIn() {
   const { company } = useCompany();
   const { jobId } = useParams();
   const navigate = useNavigate();
+  const requestIdRef = useRef(0);
+  const clockContextRef = useRef({ companyId: null, jobId: null });
   const [job, setJob] = useState(null);
   const [user, setUser] = useState(null);
+  const [supabaseCompany, setSupabaseCompany] = useState(null);
   const [activeEntry, setActiveEntry] = useState(null);
   const [userPosition, setUserPosition] = useState(null);
   const [jobPosition, setJobPosition] = useState(null);
@@ -43,42 +78,128 @@ export default function ClockIn() {
   const timerRef = useRef(null);
 
   useEffect(() => {
-    Promise.all([
-      base44.entities.Job.filter({ id: jobId }),
-      base44.auth.me(),
-      base44.entities.TimeEntry.filter({ company_id: company?.id, job_id: jobId, status: 'active' }),
-    ]).then(([jobs, u, entries]) => {
-      const j = jobs[0];
-      if (j) {
+    if (!company || !jobId) {
+      setJob(null);
+      setUser(null);
+      setSupabaseCompany(null);
+      setActiveEntry(null);
+      setJobPosition(null);
+      setElapsed('00:00:00');
+      setLunchBreakMins(0);
+      setShowLunchPrompt(false);
+      setLunchPromptDismissed(false);
+      lunchPromptDismissedRef.current = false;
+      if (timerRef.current) clearInterval(timerRef.current);
+      return;
+    }
+
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    setLoading(true);
+    setJob(null);
+    setUser(null);
+    setSupabaseCompany(null);
+    setActiveEntry(null);
+    setJobPosition(null);
+    setElapsed('00:00:00');
+    setLunchBreakMins(0);
+    setShowLunchPrompt(false);
+    setLunchPromptDismissed(false);
+    lunchPromptDismissedRef.current = false;
+    if (timerRef.current) clearInterval(timerRef.current);
+
+    const loadClockIn = async () => {
+      try {
+        const [profile, companyRows] = await Promise.all([
+          onsiteApi.auth.me(),
+          onsiteApi.tables.companies.list('name'),
+        ]);
+        if (requestId !== requestIdRef.current) return;
+
+        const resolvedCompany = resolveSupabaseCompany(profile, companyRows);
+        const [jobs, activeTimeEntry] = await Promise.all([
+          onsiteApi.tables.jobs.filter({ company_id: resolvedCompany.id, id: jobId }),
+          onsiteApi.tables.timeEntries.getMyActive(resolvedCompany.id),
+        ]);
+        if (requestId !== requestIdRef.current) return;
+
+        const j = /** @type {ClockJob | null} */ (/** @type {unknown} */ (jobs[0] || null));
+        setUser(profile);
+        setSupabaseCompany(resolvedCompany);
         setJob(j);
-        // If GPS coords stored, use them directly
-        if (j.latitude && j.longitude) {
-          setJobPosition([j.latitude, j.longitude]);
-        } else if (j.location_address) {
-          // Geocode the address using Nominatim
-          fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(j.location_address)}&limit=1`)
-            .then(r => r.json())
-            .then(results => {
-              if (results[0]) {
-                setJobPosition([parseFloat(results[0].lat), parseFloat(results[0].lon)]);
-              }
-            })
-            .catch(() => {});
+        if (activeTimeEntry) {
+          setActiveEntry(activeTimeEntry);
+          setLunchBreakMins(activeTimeEntry.lunch_break_mins ?? 0);
+          startTimer(activeTimeEntry.start_time);
+        }
+
+        if (j) {
+          const latitude = nullableCoordinate(j.latitude);
+          const longitude = nullableCoordinate(j.longitude);
+          if (latitude !== null && longitude !== null) {
+            setJobPosition([latitude, longitude]);
+          } else if (j.location_address) {
+            // Geocode the address using Nominatim
+            fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(j.location_address)}&limit=1`)
+              .then(r => r.json())
+              .then(results => {
+                if (requestId !== requestIdRef.current) return;
+                if (results[0]) {
+                  setJobPosition([parseFloat(results[0].lat), parseFloat(results[0].lon)]);
+                }
+              })
+              .catch(() => {});
+          }
+        }
+      } catch (error) {
+        if (requestId === requestIdRef.current) {
+          console.error('Failed to load Supabase clock-in state:', error);
+          setJob(null);
+          setUser(null);
+          setSupabaseCompany(null);
+          setActiveEntry(null);
+          setJobPosition(null);
+          setElapsed('00:00:00');
+          setLunchBreakMins(0);
+          setShowLunchPrompt(false);
+          setLunchPromptDismissed(false);
+          lunchPromptDismissedRef.current = false;
+          toast.error('Failed to load clock-in state');
+        }
+      } finally {
+        if (requestId === requestIdRef.current) {
+          setLoading(false);
         }
       }
-      setUser(u);
-      if (entries[0]) {
-        setActiveEntry(entries[0]);
-        startTimer(entries[0].start_time);
-      }
-    }).catch(() => {});
+    };
 
+    loadClockIn();
+    return () => {
+      requestIdRef.current += 1;
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [company, jobId]);
+
+  useEffect(() => {
     navigator.geolocation?.getCurrentPosition(pos => {
       setUserPosition([pos.coords.latitude, pos.coords.longitude]);
     });
-  }, [jobId]);
+  }, []);
 
   const lunchPromptDismissedRef = useRef(false);
+
+  useEffect(() => {
+    clockContextRef.current = {
+      companyId: supabaseCompany?.id || null,
+      jobId: job?.id || null,
+    };
+  }, [supabaseCompany?.id, job?.id]);
+
+  const isClockContextCurrent = (requestId, companyId, clockJobId) => (
+    requestId === requestIdRef.current &&
+    clockContextRef.current.companyId === companyId &&
+    clockContextRef.current.jobId === clockJobId
+  );
 
   const startTimer = (startTime) => {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -98,38 +219,58 @@ export default function ClockIn() {
   useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
 
   const handleStart = async () => {
-    if (!user || !job) return;
+    if (loading || activeEntry) return;
+    if (!user || !job || !supabaseCompany?.id) {
+      toast.error('Clock-in is not ready yet');
+      return;
+    }
+    const clockRequestId = requestIdRef.current;
+    const clockCompanyId = supabaseCompany.id;
+    const clockJobId = job.id;
     setLoading(true);
     try {
-      const now = new Date().toISOString();
+      const nowDate = new Date();
+      const now = nowDate.toISOString();
 
       // Get current GPS position to share location while on shift
       let lat = null, lng = null;
       try {
         const pos = await new Promise((res, rej) => navigator.geolocation.getCurrentPosition(res, rej, { timeout: 5000 }));
-        lat = pos.coords.latitude;
-        lng = pos.coords.longitude;
+        lat = nullableCoordinate(pos.coords.latitude);
+        lng = nullableCoordinate(pos.coords.longitude);
       } catch {}
 
-      const entry = await base44.entities.TimeEntry.create({
-        company_id: company?.id,
-        worker_email: user.email,
-        worker_name: user.full_name,
-        job_id: job.id,
-        job_name: job.job_name,
-        job_number: job.job_number,
-        date: format(new Date(), 'yyyy-MM-dd'),
+      if (!isClockContextCurrent(clockRequestId, clockCompanyId, clockJobId)) return;
+
+      const entry = await onsiteApi.tables.timeEntries.clockIn({
+        company_id: clockCompanyId,
+        job_id: clockJobId,
+        date: format(nowDate, 'yyyy-MM-dd'),
         start_time: now,
-        status: 'active',
-        ...(lat && lng ? { worker_lat: lat, worker_lng: lng } : {}),
+        worker_lat: lat,
+        worker_lng: lng,
       });
+      if (!isClockContextCurrent(clockRequestId, clockCompanyId, clockJobId)) return;
+
       setActiveEntry(entry);
-      startTimer(now);
+      setLunchBreakMins(entry?.lunch_break_mins ?? 0);
+      startTimer(entry?.start_time || now);
       toast.success('Clocked in!');
     } catch (e) {
-      toast.error('Failed to clock in. Please try again.');
+      console.error('Failed to clock in with Supabase:', e);
+      toast.error(e.message || 'Failed to clock in. Please try again.');
+      if (isClockContextCurrent(clockRequestId, clockCompanyId, clockJobId)) {
+        try {
+          const currentActive = await onsiteApi.tables.timeEntries.getMyActive(clockCompanyId);
+          if (!isClockContextCurrent(clockRequestId, clockCompanyId, clockJobId)) return;
+          setActiveEntry(currentActive);
+          if (currentActive?.start_time) startTimer(currentActive.start_time);
+        } catch {}
+      }
     } finally {
-      setLoading(false);
+      if (isClockContextCurrent(clockRequestId, clockCompanyId, clockJobId)) {
+        setLoading(false);
+      }
     }
   };
 
@@ -141,31 +282,34 @@ export default function ClockIn() {
   };
 
   const handleFinish = async () => {
-    if (!activeEntry) return;
+    if (!activeEntry || loading) return;
     setLoading(true);
-    const now = new Date().toISOString();
-    const startMs = new Date(activeEntry.start_time).getTime();
-    const rawHours = (Date.now() - startMs) / 3600000;
-    const hours = Math.round((rawHours - lunchBreakMins / 60) * 100) / 100;
+    try {
+      const completedEntry = await onsiteApi.tables.timeEntries.clockOut(activeEntry.id, {
+        finish_time: new Date().toISOString(),
+        lunch_break_mins: Number.isFinite(Number(lunchBreakMins)) ? Number(lunchBreakMins) : 0,
+      });
 
-    await base44.entities.TimeEntry.update(activeEntry.id, {
-      finish_time: now,
-      lunch_break_mins: lunchBreakMins,
-      total_hours: hours,
-      status: 'completed',
-      worker_lat: null,
-      worker_lng: null,
-    });
-
-    if (timerRef.current) clearInterval(timerRef.current);
-    setActiveEntry(null);
-    setElapsed('00:00:00');
-    toast.success(`Clocked out! ${hours.toFixed(2)} hrs logged.`);
-    setLoading(false);
-    navigate('/timesheets');
+      if (timerRef.current) clearInterval(timerRef.current);
+      setActiveEntry(null);
+      setElapsed('00:00:00');
+      const hours = Number(completedEntry?.total_hours ?? 0);
+      toast.success(`Clocked out! ${hours.toFixed(2)} hrs logged.`);
+      navigate('/timesheets');
+    } catch (error) {
+      console.error('Failed to clock out with Supabase:', error);
+      toast.error(error.message || 'Failed to clock out. Please try again.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const mapCenter = jobPosition || userPosition || [-33.8688, 151.2093];
+  const routeJobId = job?.id || null;
+  const activeJobId = activeEntry?.job_id || null;
+  const activeJobLabel = activeEntry?.job_name || 'another job';
+  const activeJobNumber = activeEntry?.job_number ? `#${activeEntry.job_number}` : '';
+  const activeJobDiffersFromRoute = Boolean(activeEntry && routeJobId && activeJobId !== routeJobId);
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -242,9 +386,21 @@ export default function ClockIn() {
         </div>
 
         {activeEntry && (
-          <p className="text-muted-foreground text-sm mb-6">
-            Started: {format(new Date(activeEntry.start_time), 'h:mm a')}
-          </p>
+          <div className="text-center mb-6">
+            <p className="text-muted-foreground text-sm">
+              Started: {format(new Date(activeEntry.start_time), 'h:mm a')}
+            </p>
+            {activeJobDiffersFromRoute && (
+              <div className="mt-3 rounded-2xl border border-green-400/30 bg-green-500/10 px-4 py-3">
+                <p className="text-green-400 text-sm font-bold">
+                  Currently clocked into {activeJobLabel}{activeJobNumber ? ` ${activeJobNumber}` : ''}
+                </p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  This page is showing {job?.job_name || 'the selected job'} for map and directions.
+                </p>
+              </div>
+            )}
+          </div>
         )}
 
         {/* Lunch Break Auto-prompt */}

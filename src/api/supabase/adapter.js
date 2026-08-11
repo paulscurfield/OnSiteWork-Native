@@ -269,6 +269,10 @@ const mapRpcTimeEntryResult = (result) => {
   return result?.time_entry ?? null;
 };
 
+const mapRpcTeamMapEntries = (result) => {
+  return Array.isArray(result?.entries) ? result.entries : [];
+};
+
 const timeEntryClockInParams = (values = {}) => ({
   p_company_id: requiredUuid(values.company_id, 'company_id'),
   p_job_id: requiredUuid(values.job_id, 'job_id'),
@@ -652,6 +656,16 @@ const createJobSchedulesAdapter = () => ({
   },
 });
 
+const createTeamMapAdapter = () => ({
+  async getTeamMapEntries(companyId) {
+    const { data, error } = await supabase.rpc('get_team_map_entries', {
+      p_company_id: requiredUuid(companyId, 'company_id'),
+    });
+    if (error) throw error;
+    return mapRpcTeamMapEntries(data);
+  },
+});
+
 export const onsiteApi = {
   auth: {
     async me() {
@@ -704,6 +718,8 @@ export const onsiteApi = {
     messageReads: createTableAdapter('message_reads'),
     invitations: createTableAdapter('invitations'),
   },
+
+  teamMap: createTeamMapAdapter(),
 
   storage: {
     async upload(bucket, path, file, options = {}) {

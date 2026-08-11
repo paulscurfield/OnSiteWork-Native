@@ -1,12 +1,29 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
+import { onsiteApi } from '@/api/supabase/adapter';
 import { useCompany } from '@/lib/companyContext';
 import {
   Briefcase, Clock, Wrench, MessageSquare, Users, Camera,
   ShieldCheck, CalendarCheck, User, Home, ChevronRight
 } from 'lucide-react';
 import { format } from 'date-fns';
+import { toast } from 'sonner';
+
+const resolveSupabaseCompany = (profile, companyRows) => {
+  if (!profile?.id) {
+    throw new Error('Not authenticated with Supabase');
+  }
+
+  if (companyRows.length === 0) {
+    throw new Error('No Supabase company found for this user');
+  }
+  if (companyRows.length > 1) {
+    throw new Error('Multiple Supabase companies found. A company selector is required before Dashboard can load safely.');
+  }
+
+  return companyRows[0];
+};
 
 const gridCards = [
   { path: '/jobs',        icon: Briefcase,     label: 'JOBS',        desc: 'Job sites & clock in' },
@@ -35,6 +52,7 @@ export default function Dashboard() {
   const { company } = useCompany();
   const location = useLocation();
   const navigate = useNavigate();
+  const requestIdRef = useRef(0);
   const [user, setUser] = useState(null);
   const [activeEntry, setActiveEntry] = useState(null);
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -48,7 +66,10 @@ export default function Dashboard() {
     }).catch(() => {});
     loadActiveEntry();
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
-    return () => clearInterval(timer);
+    return () => {
+      requestIdRef.current += 1;
+      clearInterval(timer);
+    };
   }, [company]);
 
   useEffect(() => {
@@ -64,26 +85,50 @@ export default function Dashboard() {
   };
 
   const loadActiveEntry = async () => {
-    if (!company) return;
-    const entries = await base44.entities.TimeEntry.filter({ company_id: company.id, status: 'active' });
-    setActiveEntry(entries.length > 0 ? entries[0] : null);
+    if (!company) {
+      setActiveEntry(null);
+      return;
+    }
+
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    setActiveEntry(null);
+
+    try {
+      const [profile, companyRows] = await Promise.all([
+        onsiteApi.auth.me(),
+        onsiteApi.tables.companies.list('name'),
+      ]);
+      if (requestId !== requestIdRef.current) return;
+
+      const resolvedCompany = resolveSupabaseCompany(profile, companyRows);
+      const activeTimeEntry = await onsiteApi.tables.timeEntries.getMyActive(resolvedCompany.id);
+      if (requestId !== requestIdRef.current) return;
+
+      setActiveEntry(activeTimeEntry);
+    } catch (error) {
+      if (requestId === requestIdRef.current) {
+        console.error('Failed to load Supabase active TimeEntry:', error);
+        setActiveEntry(null);
+      }
+    }
   };
 
   const handleClockOut = async () => {
-    if (!activeEntry) return;
+    if (!activeEntry || clockingOut) return;
     setClockingOut(true);
-    const finishTime = new Date().toISOString();
-    const rawHours = (new Date(finishTime).getTime() - new Date(activeEntry.start_time).getTime()) / 3600000;
-    const totalHours = Math.round((rawHours - (activeEntry.lunch_break_mins || 0) / 60) * 100) / 100;
-    await base44.entities.TimeEntry.update(activeEntry.id, {
-      finish_time: finishTime,
-      total_hours: totalHours,
-      status: 'completed',
-      worker_lat: null,
-      worker_lng: null,
-    });
-    setActiveEntry(null);
-    setClockingOut(false);
+    try {
+      await onsiteApi.tables.timeEntries.clockOut(activeEntry.id, {
+        finish_time: new Date().toISOString(),
+        lunch_break_mins: activeEntry.lunch_break_mins ?? 0,
+      });
+      setActiveEntry(null);
+    } catch (error) {
+      console.error('Failed to clock out with Supabase:', error);
+      toast.error(error.message || 'Failed to clock out');
+    } finally {
+      setClockingOut(false);
+    }
   };
 
   const getElapsed = () => {

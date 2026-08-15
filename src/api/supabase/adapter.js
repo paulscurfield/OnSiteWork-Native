@@ -19,6 +19,8 @@ const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 const JOB_STATUS_VALUES = new Set(['active', 'completed', 'on_hold']);
+const EQUIPMENT_CATEGORY_VALUES = new Set(['machinery', 'tools', 'vehicle', 'safety', 'electrical', 'other']);
+const EQUIPMENT_ADMIN_STATUS_VALUES = new Set(['available', 'maintenance']);
 
 const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 
@@ -281,6 +283,22 @@ const mapRpcPreStartResult = (result) => {
   return preStart;
 };
 
+const mapRpcEquipmentTransitionResult = (result) => {
+  const equipment = result?.equipment;
+  const log = result?.log;
+  if (
+    !equipment ||
+    typeof equipment !== 'object' ||
+    Array.isArray(equipment) ||
+    !log ||
+    typeof log !== 'object' ||
+    Array.isArray(log)
+  ) {
+    throw new Error('equipment transition RPC returned an invalid response');
+  }
+  return { equipment, log };
+};
+
 const requiredJson = (value, fieldName) => {
   if (value === undefined || value === null) {
     throw new Error(`${fieldName} is required`);
@@ -310,6 +328,62 @@ const preStartCreateParams = (values = {}) => ({
   p_answers: requiredJson(values.answers, 'answers'),
   p_general_comments: optionalText(values.general_comments) ?? null,
   p_has_faults: requiredBoolean(values.has_faults, 'has_faults'),
+});
+
+const normalizeEquipmentCategory = (value) => {
+  const category = requiredText(value, 'category');
+  if (!EQUIPMENT_CATEGORY_VALUES.has(category)) {
+    throw new Error('category must be machinery, tools, vehicle, safety, electrical, or other');
+  }
+  return category;
+};
+
+const normalizeEquipmentAdminStatus = (value, fallback) => {
+  if (value === undefined || value === null || String(value).trim() === '') {
+    if (fallback !== undefined) return fallback;
+    throw new Error('status must be available or maintenance');
+  }
+  const status = String(value).trim();
+  if (!EQUIPMENT_ADMIN_STATUS_VALUES.has(status)) {
+    throw new Error('status must be available or maintenance');
+  }
+  return status;
+};
+
+const normalizeEquipmentCreateValues = (values = {}) => ({
+  company_id: requiredUuid(values.company_id, 'company_id'),
+  name: requiredText(values.name, 'name'),
+  equipment_id: requiredText(values.equipment_id, 'equipment_id'),
+  category: normalizeEquipmentCategory(values.category ?? 'tools'),
+  status: normalizeEquipmentAdminStatus(values.status, 'available'),
+  notes: optionalText(values.notes) ?? null,
+});
+
+const normalizeEquipmentUpdateValues = (values = {}) => {
+  const updateValues = {};
+
+  if (hasOwn(values, 'name')) {
+    updateValues.name = requiredText(values.name, 'name');
+  }
+  if (hasOwn(values, 'equipment_id')) {
+    updateValues.equipment_id = requiredText(values.equipment_id, 'equipment_id');
+  }
+  if (hasOwn(values, 'category')) {
+    updateValues.category = normalizeEquipmentCategory(values.category);
+  }
+  if (hasOwn(values, 'status')) {
+    updateValues.status = normalizeEquipmentAdminStatus(values.status);
+  }
+  if (hasOwn(values, 'notes')) {
+    updateValues.notes = optionalText(values.notes) ?? null;
+  }
+
+  return updateValues;
+};
+
+const equipmentTransitionParams = (id, companyId) => ({
+  p_company_id: requiredUuid(companyId, 'company_id'),
+  p_equipment_id: requiredUuid(id, 'equipment_id'),
 });
 
 const timeEntryClockInParams = (values = {}) => ({
@@ -630,6 +704,95 @@ const createPreStartsAdapter = () => ({
   },
 });
 
+const createEquipmentAdapter = () => ({
+  async list(orderBy, limit) {
+    let query = supabase.from('equipment').select('*');
+    query = orderQuery(query, orderBy);
+    if (limit) query = query.limit(limit);
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
+  },
+
+  async filter(filters = {}, orderBy, limit) {
+    let query = supabase.from('equipment').select('*');
+    query = applyFilters(query, filters);
+    query = orderQuery(query, orderBy);
+    if (limit) query = query.limit(limit);
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
+  },
+
+  async createAdmin(values) {
+    const { data, error } = await supabase
+      .from('equipment')
+      .insert(normalizeEquipmentCreateValues(values))
+      .select()
+      .single();
+    if (error) throw error;
+    return data;
+  },
+
+  async updateAdmin(id, values) {
+    const updateValues = normalizeEquipmentUpdateValues(values);
+    if (Object.keys(updateValues).length === 0) {
+      throw new Error('No editable equipment fields supplied');
+    }
+
+    const { data, error } = await supabase
+      .from('equipment')
+      .update(updateValues)
+      .eq('id', requiredUuid(id, 'equipment_id'))
+      .select()
+      .single();
+    if (error) throw error;
+    return data;
+  },
+
+  async deleteAdmin(id) {
+    const { error } = await supabase
+      .from('equipment')
+      .delete()
+      .eq('id', requiredUuid(id, 'equipment_id'));
+    if (error) throw error;
+    return true;
+  },
+
+  async checkout(id, companyId) {
+    const { data, error } = await supabase.rpc('checkout_equipment', equipmentTransitionParams(id, companyId));
+    if (error) throw error;
+    return mapRpcEquipmentTransitionResult(data);
+  },
+
+  async returnEquipment(id, companyId) {
+    const { data, error } = await supabase.rpc('return_equipment', equipmentTransitionParams(id, companyId));
+    if (error) throw error;
+    return mapRpcEquipmentTransitionResult(data);
+  },
+});
+
+const createEquipmentLogsAdapter = () => ({
+  async list(orderBy, limit) {
+    let query = supabase.from('equipment_logs').select('*');
+    query = orderQuery(query, orderBy);
+    if (limit) query = query.limit(limit);
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
+  },
+
+  async filter(filters = {}, orderBy, limit) {
+    let query = supabase.from('equipment_logs').select('*');
+    query = applyFilters(query, filters);
+    query = orderQuery(query, orderBy);
+    if (limit) query = query.limit(limit);
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
+  },
+});
+
 const createJobSchedulesAdapter = () => ({
   async list(orderBy = 'start_date', limit) {
     let query = supabase
@@ -774,8 +937,8 @@ export const onsiteApi = {
     companyMembers: createCompanyMembersAdapter(),
     jobs: createJobsAdapter(),
     timeEntries: createTimeEntriesAdapter(),
-    equipment: createTableAdapter('equipment'),
-    equipmentLogs: createTableAdapter('equipment_logs'),
+    equipment: createEquipmentAdapter(),
+    equipmentLogs: createEquipmentLogsAdapter(),
     preStarts: createPreStartsAdapter(),
     jobPhotos: createTableAdapter('job_photos'),
     leaveRequests: createTableAdapter('leave_requests'),

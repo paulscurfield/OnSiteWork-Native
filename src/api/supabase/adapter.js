@@ -273,6 +273,45 @@ const mapRpcTeamMapEntries = (result) => {
   return Array.isArray(result?.entries) ? result.entries : [];
 };
 
+const mapRpcPreStartResult = (result) => {
+  const preStart = result?.pre_start;
+  if (!preStart || typeof preStart !== 'object' || Array.isArray(preStart)) {
+    throw new Error('create_pre_start returned an invalid response');
+  }
+  return preStart;
+};
+
+const requiredJson = (value, fieldName) => {
+  if (value === undefined || value === null) {
+    throw new Error(`${fieldName} is required`);
+  }
+
+  try {
+    JSON.stringify(value);
+  } catch {
+    throw new Error(`${fieldName} must be JSON-compatible`);
+  }
+
+  return value;
+};
+
+const requiredBoolean = (value, fieldName) => {
+  if (typeof value !== 'boolean') {
+    throw new Error(`${fieldName} must be a boolean`);
+  }
+  return value;
+};
+
+const preStartCreateParams = (values = {}) => ({
+  p_company_id: requiredUuid(values.company_id, 'company_id'),
+  p_job_id: requiredUuid(values.job_id, 'job_id'),
+  p_equipment_id: optionalUuid(values.equipment_id, 'equipment_id'),
+  p_date: toDateOnly(values.date, 'date'),
+  p_answers: requiredJson(values.answers, 'answers'),
+  p_general_comments: optionalText(values.general_comments) ?? null,
+  p_has_faults: requiredBoolean(values.has_faults, 'has_faults'),
+});
+
 const timeEntryClockInParams = (values = {}) => ({
   p_company_id: requiredUuid(values.company_id, 'company_id'),
   p_job_id: requiredUuid(values.job_id, 'job_id'),
@@ -564,6 +603,33 @@ const createTimeEntriesAdapter = () => {
   };
 };
 
+const createPreStartsAdapter = () => ({
+  async list(orderBy, limit) {
+    let query = supabase.from('pre_starts').select('*');
+    query = orderQuery(query, orderBy);
+    if (limit) query = query.limit(limit);
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
+  },
+
+  async filter(filters = {}, orderBy, limit) {
+    let query = supabase.from('pre_starts').select('*');
+    query = applyFilters(query, filters);
+    query = orderQuery(query, orderBy);
+    if (limit) query = query.limit(limit);
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
+  },
+
+  async createWorker(values) {
+    const { data, error } = await supabase.rpc('create_pre_start', preStartCreateParams(values));
+    if (error) throw error;
+    return mapRpcPreStartResult(data);
+  },
+});
+
 const createJobSchedulesAdapter = () => ({
   async list(orderBy = 'start_date', limit) {
     let query = supabase
@@ -710,7 +776,7 @@ export const onsiteApi = {
     timeEntries: createTimeEntriesAdapter(),
     equipment: createTableAdapter('equipment'),
     equipmentLogs: createTableAdapter('equipment_logs'),
-    preStarts: createTableAdapter('pre_starts'),
+    preStarts: createPreStartsAdapter(),
     jobPhotos: createTableAdapter('job_photos'),
     leaveRequests: createTableAdapter('leave_requests'),
     jobSchedules: createJobSchedulesAdapter(),

@@ -25,6 +25,65 @@ const resolveSupabaseCompany = (profile, companyRows) => {
   return companyRows[0];
 };
 
+const sortTimeEntries = (items = []) => {
+  return [...items].sort((a, b) => {
+    if (a.date !== b.date) return (a.date || '').localeCompare(b.date || '');
+    const ta = a.start_time ? new Date(a.start_time).getTime() : 0;
+    const tb = b.start_time ? new Date(b.start_time).getTime() : 0;
+    return ta - tb;
+  });
+};
+
+const isEntryInWeek = (entry, weekStart) => {
+  const start = format(weekStart, 'yyyy-MM-dd');
+  const end = format(addDays(weekStart, 6), 'yyyy-MM-dd');
+  return entry.date >= start && entry.date <= end;
+};
+
+const formJobIdFromEntry = (entry) => {
+  if (entry.job_id) return entry.job_id;
+  if (entry.job_name === 'Sick Day') return 'sick_day';
+  if (entry.job_name === 'Annual Leave') return 'annual_leave';
+  return '';
+};
+
+const localDateTimeToIso = (dateString, timeString) => {
+  const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateString || '');
+  const timeMatch = /^(\d{2}):(\d{2})$/.exec(timeString || '');
+  if (!dateMatch || !timeMatch) {
+    throw new Error('Enter a valid date and time');
+  }
+
+  const [, yearText, monthText, dayText] = dateMatch;
+  const [, hourText, minuteText] = timeMatch;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const date = new Date(year, month - 1, day, hour, minute, 0, 0);
+
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day ||
+    date.getHours() !== hour ||
+    date.getMinutes() !== minute
+  ) {
+    throw new Error('Enter a valid local date and time');
+  }
+
+  return date.toISOString();
+};
+
+const mapDirectoryWorker = (worker = {}) => ({
+  user_id: worker.user_id,
+  email: worker.email,
+  name: worker.display_name || worker.full_name || worker.email || `Worker ${String(worker.user_id || '').slice(0, 8)}`,
+  role: worker.role,
+});
+
 /**
  * @typedef {{
  *   job_id: string,
@@ -47,12 +106,13 @@ const resolveSupabaseCompany = (profile, companyRows) => {
 export default function Admin() {
   const { company } = useCompany();
   const adminJobsRequestIdRef = useRef(0);
+  const timeEntriesRequestIdRef = useRef(0);
   const [user, setUser] = useState(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [activeTab, setActiveTab] = useState('Jobs');
   const [supabaseCompany, setSupabaseCompany] = useState(null);
   const [adminJobs, setAdminJobs] = useState([]);
-  const [timeEntryJobs, setTimeEntryJobs] = useState([]);
+  const [timeEntryWorkers, setTimeEntryWorkers] = useState([]);
   const [entries, setEntries] = useState([]);
   const [users, setUsers] = useState([]);
   const [showJobModal, setShowJobModal] = useState(false);
@@ -78,6 +138,7 @@ export default function Admin() {
   const [editEntry, setEditEntry] = useState(null);
   const [editForm, setEditForm] = useState(/** @type {AdminEditEntryForm} */ ({}));
   const [editSaving, setEditSaving] = useState(false);
+  const [entryDeleteSavingId, setEntryDeleteSavingId] = useState(null);
   const [photos, setPhotos] = useState([]);
   const [photoFilter, setPhotoFilter] = useState('');
   const [lightboxPhoto, setLightboxPhoto] = useState(null);
@@ -103,10 +164,15 @@ export default function Admin() {
   }, []);
 
   useEffect(() => {
-    if (activeTab === 'Timesheets') loadEntries();
+    if (activeTab === 'Timesheets') {
+      loadEntries();
+      return () => {
+        timeEntriesRequestIdRef.current += 1;
+      };
+    }
     if (activeTab === 'Photos') loadPhotos();
     if (activeTab === 'Pre-Starts') loadPreStarts();
-  }, [activeTab, weekStart]);
+  }, [activeTab, weekStart, company]);
 
   const loadPhotos = async () => {
     const all = await base44.entities.JobPhoto.filter({ company_id: company?.id }, '-created_date', 200);
@@ -258,42 +324,68 @@ OnSite Timesheet`;
 
   const loadAll = async () => {
     const adminJobsLoad = loadAdminJobs();
-    const [j, allEntries, usersRes] = await Promise.all([
-      base44.entities.Job.filter({ company_id: company?.id }, '-created_date'),
-      base44.entities.TimeEntry.filter({ company_id: company?.id }, '-date', 500),
+    const [usersRes] = await Promise.all([
       base44.functions.invoke('getCompanyUsers', {}),
     ]);
-    await adminJobsLoad;
-    setTimeEntryJobs(j);
+    const resolvedCompany = await adminJobsLoad;
+
+    if (resolvedCompany) {
+      try {
+        const workerRows = await onsiteApi.tables.companyMembers.directory(resolvedCompany.id);
+        setTimeEntryWorkers(workerRows.map(mapDirectoryWorker));
+      } catch (error) {
+        console.error('Failed to load Supabase timesheet worker directory:', error);
+        setTimeEntryWorkers([]);
+      }
+    } else {
+      setTimeEntryWorkers([]);
+    }
 
     // Build worker map - start with actual registered company users
     const workerMap = {};
     (usersRes?.data?.users || []).forEach(u => {
       workerMap[u.email] = { email: u.email, name: u.full_name || u.email, role: u.role };
     });
-    // Also add anyone with time entries (catches edge cases)
-    allEntries.forEach(e => {
-      if (e.worker_email && !workerMap[e.worker_email]) {
-        workerMap[e.worker_email] = { email: e.worker_email, name: e.worker_name };
-      }
-    });
     setUsers(Object.values(workerMap));
   };
 
   const loadEntries = async () => {
-    const start = format(weekStart, 'yyyy-MM-dd');
-    const end = format(addDays(weekStart, 6), 'yyyy-MM-dd');
-    const all = await base44.entities.TimeEntry.filter({ company_id: company?.id }, '-date');
-    const filtered = all
-      .filter(e => e.date >= start && e.date <= end)
-      .sort((a, b) => {
-        if (a.date !== b.date) return a.date.localeCompare(b.date);
-        const ta = a.start_time ? new Date(a.start_time).getTime() : 0;
-        const tb = b.start_time ? new Date(b.start_time).getTime() : 0;
-        return ta - tb;
-      });
+    if (!company) {
+      timeEntriesRequestIdRef.current += 1;
+      setEntries([]);
+      setAdminJobs([]);
+      setTimeEntryWorkers([]);
+      return;
+    }
 
-    setEntries(filtered);
+    const requestId = timeEntriesRequestIdRef.current + 1;
+    timeEntriesRequestIdRef.current = requestId;
+    setEntries([]);
+    setAdminJobs([]);
+    setTimeEntryWorkers([]);
+
+    try {
+      const resolvedCompany = await resolveAdminSupabaseCompany();
+      const [timeEntryRows, workerRows, jobRows] = await Promise.all([
+        onsiteApi.tables.timeEntries.filter({ company_id: resolvedCompany.id }, '-date'),
+        onsiteApi.tables.companyMembers.directory(resolvedCompany.id),
+        onsiteApi.tables.jobs.filter({ company_id: resolvedCompany.id }, '-created_date'),
+      ]);
+      if (requestId !== timeEntriesRequestIdRef.current) return;
+
+      setSupabaseCompany(resolvedCompany);
+      setTimeEntryWorkers(workerRows.map(mapDirectoryWorker));
+      setAdminJobs(jobRows);
+      setEntries(sortTimeEntries(timeEntryRows.filter(entry => isEntryInWeek(entry, weekStart))));
+    } catch (error) {
+      if (requestId === timeEntriesRequestIdRef.current) {
+        console.error('Failed to load Supabase admin timesheets:', error);
+        setEntries([]);
+        setAdminJobs([]);
+        setTimeEntryWorkers([]);
+        toast.error('Failed to load timesheets');
+      }
+    }
   };
 
   const openAddJob = () => {
@@ -483,7 +575,7 @@ OnSite Timesheet`;
   // Group entries by worker
   const workerGroups = entries.reduce((acc, e) => {
     const key = e.worker_email;
-    if (!acc[key]) acc[key] = { name: e.worker_name, email: e.worker_email, entries: [] };
+    if (!acc[key]) acc[key] = { user_id: e.worker_id, name: e.worker_name, email: e.worker_email, entries: [] };
     acc[key].entries.push(e);
     return acc;
   }, {});
@@ -494,6 +586,7 @@ OnSite Timesheet`;
   };
 
   const handleSaveAddDay = async () => {
+    if (addDaySaving) return;
     if (!addDayForm.date || !addDayForm.job_id) {
       toast.error('Date and job are required');
       return;
@@ -502,45 +595,50 @@ OnSite Timesheet`;
       toast.error('Start time is required');
       return;
     }
-    setAddDaySaving(true);
-    const isSickDay = addDayForm.job_id === 'sick_day';
-    const isAnnualLeave = addDayForm.job_id === 'annual_leave';
-    const isLeaveEntry = isSickDay || isAnnualLeave;
-    const job = isLeaveEntry ? null : timeEntryJobs.find(j => j.id === addDayForm.job_id);
-    const startISO = addDayForm.start_time ? `${addDayForm.date}T${addDayForm.start_time}:00` : `${addDayForm.date}T00:00:00`;
-    const finishISO = addDayForm.finish_time ? `${addDayForm.date}T${addDayForm.finish_time}:00` : null;
-    let totalHoursCalc = 0;
-    if (!isLeaveEntry && finishISO) {
-      const rawHours = (new Date(finishISO).getTime() - new Date(startISO).getTime()) / 3600000;
-      totalHoursCalc = Math.round((rawHours - (addDayForm.lunch_break_mins || 0) / 60) * 100) / 100;
+    if (!addDayWorker?.user_id) {
+      toast.error('Select a Supabase worker');
+      return;
     }
-    const leaveLabel = isSickDay ? 'Sick Day' : 'Annual Leave';
-    const leaveNote = isSickDay ? '🤒 Sick Day' : '🏖️ Annual Leave';
-    await base44.entities.TimeEntry.create({
-      company_id: company?.id,
-      worker_email: addDayWorker.email,
-      worker_name: addDayWorker.name,
-      job_id: isLeaveEntry ? addDayForm.job_id : addDayForm.job_id,
-      job_name: isLeaveEntry ? leaveLabel : (job?.job_name || ''),
-      job_number: isLeaveEntry ? '' : (job?.job_number || ''),
-      date: addDayForm.date,
-      start_time: startISO,
-      finish_time: finishISO,
-      lunch_break_mins: isLeaveEntry ? 0 : addDayForm.lunch_break_mins,
-      total_hours: totalHoursCalc,
-      status: 'manual',
-      notes: isLeaveEntry ? leaveNote : addDayForm.notes,
-    });
-    toast.success('Day added!');
-    setAddDayWorker(null);
-    setAddDaySaving(false);
-    loadEntries();
+    setAddDaySaving(true);
+    try {
+      const isSickDay = addDayForm.job_id === 'sick_day';
+      const isAnnualLeave = addDayForm.job_id === 'annual_leave';
+      const isLeaveEntry = isSickDay || isAnnualLeave;
+      const resolvedCompany = await resolveAdminSupabaseCompany();
+      const job = isLeaveEntry ? null : adminJobs.find(j => j.id === addDayForm.job_id);
+      if (!isLeaveEntry && !job) {
+        throw new Error('Select a valid Supabase job');
+      }
+
+      const leaveLabel = isSickDay ? 'Sick Day' : 'Annual Leave';
+      const leaveNote = isSickDay ? '🤒 Sick Day' : '🏖️ Annual Leave';
+      await onsiteApi.tables.timeEntries.createManual({
+        company_id: resolvedCompany.id,
+        worker_id: addDayWorker.user_id,
+        job_id: isLeaveEntry ? null : job.id,
+        job_name: isLeaveEntry ? leaveLabel : null,
+        job_number: isLeaveEntry ? '' : null,
+        date: addDayForm.date,
+        start_time: localDateTimeToIso(addDayForm.date, addDayForm.start_time || '00:00'),
+        finish_time: addDayForm.finish_time ? localDateTimeToIso(addDayForm.date, addDayForm.finish_time) : null,
+        lunch_break_mins: isLeaveEntry ? 0 : addDayForm.lunch_break_mins,
+        notes: isLeaveEntry ? leaveNote : addDayForm.notes,
+      });
+      toast.success('Day added!');
+      setAddDayWorker(null);
+      await loadEntries();
+    } catch (error) {
+      console.error('Failed to create Supabase admin TimeEntry:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to add day');
+    } finally {
+      setAddDaySaving(false);
+    }
   };
 
   const openEditEntry = (e) => {
     setEditEntry(e);
     setEditForm({
-      job_id: e.job_id || '',
+      job_id: formJobIdFromEntry(e),
       date: e.date || '',
       start_time: e.start_time ? format(parseISO(e.start_time), 'HH:mm') : '',
       finish_time: e.finish_time ? format(parseISO(e.finish_time), 'HH:mm') : '',
@@ -550,51 +648,68 @@ OnSite Timesheet`;
   };
 
   const handleSaveEntry = async () => {
+    if (editSaving) return;
     setEditSaving(true);
-    const dateStr = editForm.date || editEntry.date;
-    const startISO = editForm.start_time ? `${dateStr}T${editForm.start_time}:00` : null;
-    const finishISO = editForm.finish_time ? `${dateStr}T${editForm.finish_time}:00` : null;
-    let totalHoursCalc = editEntry.total_hours;
-    if (startISO && finishISO) {
-      const rawHours = (new Date(finishISO).getTime() - new Date(startISO).getTime()) / 3600000;
-      totalHoursCalc = Math.round((rawHours - (editForm.lunch_break_mins || 0) / 60) * 100) / 100;
+    try {
+      const dateStr = editForm.date || editEntry.date;
+      const isSickDay = editForm.job_id === 'sick_day';
+      const isAnnualLeave = editForm.job_id === 'annual_leave';
+      const isLeaveEntry = isSickDay || isAnnualLeave;
+      const job = isLeaveEntry ? null : adminJobs.find(j => j.id === editForm.job_id);
+      if (!isLeaveEntry && !job) {
+        throw new Error('Select a valid Supabase job');
+      }
+      const leaveLabel = isSickDay ? 'Sick Day' : 'Annual Leave';
+
+      await onsiteApi.tables.timeEntries.updateManual(editEntry.id, {
+        job_id: isLeaveEntry ? null : job.id,
+        job_name: isLeaveEntry ? leaveLabel : null,
+        job_number: isLeaveEntry ? '' : null,
+        date: dateStr,
+        start_time: localDateTimeToIso(dateStr, editForm.start_time),
+        finish_time: editForm.finish_time ? localDateTimeToIso(dateStr, editForm.finish_time) : null,
+        lunch_break_mins: editForm.lunch_break_mins,
+        notes: editForm.notes,
+      });
+      toast.success('Entry updated');
+      setEditEntry(null);
+      await loadEntries();
+    } catch (error) {
+      console.error('Failed to update Supabase admin TimeEntry:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to update entry');
+    } finally {
+      setEditSaving(false);
     }
-    const job = timeEntryJobs.find(j => j.id === editForm.job_id);
-    await base44.entities.TimeEntry.update(editEntry.id, {
-      job_id: editForm.job_id,
-      job_name: job?.job_name || editEntry.job_name,
-      job_number: job?.job_number || editEntry.job_number,
-      date: dateStr,
-      start_time: startISO,
-      finish_time: finishISO,
-      lunch_break_mins: editForm.lunch_break_mins,
-      total_hours: totalHoursCalc,
-      notes: editForm.notes,
-    });
-    toast.success('Entry updated');
-    setEditEntry(null);
-    setEditSaving(false);
-    loadEntries();
   };
 
   const handleDeleteEntry = async (id) => {
-    await base44.entities.TimeEntry.delete(id);
-    toast.success('Entry deleted');
-    setEditEntry(null);
-    loadEntries();
+    if (entryDeleteSavingId) return;
+    setEntryDeleteSavingId(id);
+    try {
+      await onsiteApi.tables.timeEntries.delete(id);
+      setEntries(currentEntries => currentEntries.filter(entry => entry.id !== id));
+      toast.success('Entry deleted');
+      setEditEntry(null);
+    } catch (error) {
+      console.error('Failed to delete Supabase admin TimeEntry:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to delete entry');
+    } finally {
+      setEntryDeleteSavingId(null);
+    }
   };
 
   const handleRemoveWorker = async () => {
     if (!workerToRemove) return;
     setRemoving(true);
-    // Delete all time entries for this worker
-    const workerEntries = await base44.entities.TimeEntry.filter({ worker_email: workerToRemove.email });
-    await Promise.all(workerEntries.map(e => base44.entities.TimeEntry.delete(e.id)));
-    setUsers(users.filter(u => u.email !== workerToRemove.email));
-    toast.success(`${workerToRemove.name} removed`);
-    setRemoving(false);
-    setShowRemoveModal(false);
-    setWorkerToRemove(null);
+    try {
+      setUsers(users.filter(u => u.email !== workerToRemove.email));
+      setTimeEntryWorkers(workers => workers.filter(u => u.email !== workerToRemove.email));
+      toast.success(`${workerToRemove.name} removed`);
+      setShowRemoveModal(false);
+      setWorkerToRemove(null);
+    } finally {
+      setRemoving(false);
+    }
   };
 
   const handleInviteWorker = async () => {
@@ -820,7 +935,7 @@ OnSite Timesheet`;
                   <option value="">Select job...</option>
                   <option value="sick_day">🤒 Sick Day</option>
                   <option value="annual_leave">🏖️ Annual Leave</option>
-                  {timeEntryJobs.map(j => (
+                  {adminJobs.map(j => (
                     <option key={j.id} value={j.id}>{j.job_name} #{j.job_number}</option>
                   ))}
                 </select>
@@ -879,9 +994,9 @@ OnSite Timesheet`;
               </button>
             </div>
             <div className="space-y-2 max-h-72 overflow-y-auto">
-              {users.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-4">No workers found. Workers appear here once they've logged time.</p>
-              ) : users.map(u => (
+              {timeEntryWorkers.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-4">No workers found.</p>
+              ) : timeEntryWorkers.map(u => (
                 <button key={u.email}
                   onClick={() => { openAddDay(u); setShowWorkerPicker(false); }}
                   className="w-full flex items-center gap-3 px-4 py-3 rounded-xl bg-muted/40 border border-border hover:bg-muted transition-all text-left">
@@ -1097,7 +1212,7 @@ OnSite Timesheet`;
               </button>
             </div>
             <p className="text-sm text-muted-foreground">
-              Are you sure you want to remove <span className="font-bold text-foreground">{workerToRemove?.name}</span>? This will delete all their timesheet entries.
+              Are you sure you want to remove <span className="font-bold text-foreground">{workerToRemove?.name}</span>? Existing timesheet history will be preserved.
             </p>
             <div className="flex gap-3">
               <button onClick={() => setShowRemoveModal(false)}
@@ -1191,7 +1306,9 @@ OnSite Timesheet`;
                   onChange={e => setEditForm(f => ({ ...f, job_id: e.target.value }))}
                   className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary">
                   <option value="">Select job...</option>
-                  {timeEntryJobs.map(j => <option key={j.id} value={j.id}>{j.job_name} #{j.job_number}</option>)}
+                  <option value="sick_day">🤒 Sick Day</option>
+                  <option value="annual_leave">🏖️ Annual Leave</option>
+                  {adminJobs.map(j => <option key={j.id} value={j.id}>{j.job_name} #{j.job_number}</option>)}
                 </select>
               </div>
               <div>
@@ -1234,10 +1351,10 @@ OnSite Timesheet`;
               </div>
             </div>
             <div className="flex gap-3 pt-1">
-              <button onClick={() => handleDeleteEntry(editEntry.id)}
-                className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-destructive/15 border border-destructive/30 text-destructive font-bold text-sm transition-all active:scale-95">
+              <button onClick={() => handleDeleteEntry(editEntry.id)} disabled={entryDeleteSavingId === editEntry.id}
+                className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-destructive/15 border border-destructive/30 text-destructive font-bold text-sm transition-all active:scale-95 disabled:opacity-60">
                 <Trash2 className="w-4 h-4" />
-                Delete
+                {entryDeleteSavingId === editEntry.id ? 'Deleting...' : 'Delete'}
               </button>
               <button onClick={handleSaveEntry} disabled={editSaving}
                 className="flex-1 py-3 rounded-2xl bg-primary text-primary-foreground font-bold text-sm disabled:opacity-60 transition-all active:scale-95 flex items-center justify-center gap-2">

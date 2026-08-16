@@ -77,7 +77,7 @@ begin
     return new;
   end if;
 
-  if current_setting('onsite.equipment_photo_write_context', true) <> 'set_photo' then
+  if current_setting('onsite.equipment_photo_write_context', true) is distinct from 'set_photo' then
     raise exception 'Equipment photo_path must be changed with set_equipment_photo_admin()';
   end if;
 

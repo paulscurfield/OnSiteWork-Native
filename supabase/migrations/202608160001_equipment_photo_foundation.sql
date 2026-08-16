@@ -52,7 +52,7 @@ to authenticated
 using (
   bucket_id = 'equipment-photos'
   and case
-    when name ~* '^company/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/equipment/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[^/]+$'
+    when name ~* '^company/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/equipment/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[^/]+$'
       then public.is_company_admin(split_part(name, '/', 2)::uuid)
     else false
   end

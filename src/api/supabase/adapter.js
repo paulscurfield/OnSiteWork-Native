@@ -21,6 +21,13 @@ const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 const JOB_STATUS_VALUES = new Set(['active', 'completed', 'on_hold']);
 const EQUIPMENT_CATEGORY_VALUES = new Set(['machinery', 'tools', 'vehicle', 'safety', 'electrical', 'other']);
 const EQUIPMENT_ADMIN_STATUS_VALUES = new Set(['available', 'maintenance']);
+const EQUIPMENT_PHOTO_BUCKET = 'equipment-photos';
+const EQUIPMENT_PHOTO_MAX_BYTES = 20 * 1024 * 1024;
+const EQUIPMENT_PHOTO_EXTENSIONS = new Map([
+  ['image/jpeg', 'jpg'],
+  ['image/png', 'png'],
+  ['image/webp', 'webp'],
+]);
 
 const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 
@@ -385,6 +392,147 @@ const equipmentTransitionParams = (id, companyId) => ({
   p_company_id: requiredUuid(companyId, 'company_id'),
   p_equipment_id: requiredUuid(id, 'equipment_id'),
 });
+
+const equipmentPhotoPathPrefix = (companyId, equipmentId) => (
+  `company/${companyId}/equipment/${equipmentId}/`
+);
+
+const requiredEquipmentPhotoPath = (photoPath, companyId, equipmentId) => {
+  const path = requiredText(photoPath, 'photo_path');
+  const prefix = equipmentPhotoPathPrefix(companyId, equipmentId);
+  if (!path.startsWith(prefix)) {
+    throw new Error('photo_path must match the Equipment photo path');
+  }
+
+  const filename = path.slice(prefix.length);
+  if (!filename || filename.includes('/')) {
+    throw new Error('photo_path must include a single Equipment photo filename');
+  }
+
+  return path;
+};
+
+const normalizeEquipmentPhotoIds = ({ companyId, equipmentId }) => ({
+  companyId: requiredUuid(companyId, 'company_id'),
+  equipmentId: requiredUuid(equipmentId, 'equipment_id'),
+});
+
+const normalizeSignedUrlExpiry = (expiresIn) => {
+  if (expiresIn === undefined || expiresIn === null) return 3600;
+  const seconds = Number(expiresIn);
+  if (!Number.isInteger(seconds) || seconds <= 0) {
+    throw new Error('expiresIn must be a positive integer');
+  }
+  return seconds;
+};
+
+const validateEquipmentPhotoFile = (file) => {
+  if (!file || typeof file !== 'object') {
+    throw new Error('photo file is required');
+  }
+
+  const size = Number(file.size);
+  if (!Number.isFinite(size) || size <= 0) {
+    throw new Error('photo file must not be empty');
+  }
+  if (size > EQUIPMENT_PHOTO_MAX_BYTES) {
+    throw new Error('photo file must be 20 MB or smaller');
+  }
+
+  const mimeType = typeof file.type === 'string' ? file.type.trim() : '';
+  const extension = EQUIPMENT_PHOTO_EXTENSIONS.get(mimeType);
+  if (!extension) {
+    throw new Error('photo file must be JPEG, PNG, or WebP');
+  }
+
+  return { mimeType, extension };
+};
+
+const randomEquipmentPhotoFilename = (extension) => {
+  const randomUUID = globalThis.crypto?.randomUUID?.bind(globalThis.crypto);
+  if (typeof randomUUID !== 'function') {
+    throw new Error('Secure UUID generation is not available');
+  }
+  return `${randomUUID()}.${extension}`;
+};
+
+const equipmentPhotoPath = (companyId, equipmentId, extension) => (
+  `${equipmentPhotoPathPrefix(companyId, equipmentId)}${randomEquipmentPhotoFilename(extension)}`
+);
+
+const removeEquipmentPhotoObject = async ({ companyId, equipmentId, photoPath }) => {
+  const ids = normalizeEquipmentPhotoIds({ companyId, equipmentId });
+  const path = requiredEquipmentPhotoPath(photoPath, ids.companyId, ids.equipmentId);
+  const { error } = await supabase.storage
+    .from(EQUIPMENT_PHOTO_BUCKET)
+    .remove([path]);
+  if (error) throw error;
+  return true;
+};
+
+const cleanupEquipmentPhotoObject = async ({ companyId, equipmentId, photoPath, currentPhotoPath }) => {
+  if (!photoPath || photoPath === currentPhotoPath) return null;
+
+  try {
+    await removeEquipmentPhotoObject({ companyId, equipmentId, photoPath });
+    return null;
+  } catch {
+    return 'Photo cleanup failed; the old storage object may remain.';
+  }
+};
+
+const cleanupUploadedEquipmentPhoto = async ({ companyId, equipmentId, photoPath }) => {
+  try {
+    await removeEquipmentPhotoObject({ companyId, equipmentId, photoPath });
+  } catch {
+    // Best-effort cleanup must not hide the original attach failure.
+  }
+};
+
+const setEquipmentPhotoAdmin = async ({ companyId, equipmentId, photoPath }) => {
+  const { data, error } = await supabase.rpc('set_equipment_photo_admin', {
+    p_company_id: companyId,
+    p_equipment_id: equipmentId,
+    p_photo_path: photoPath,
+  });
+  if (error) throw error;
+  return data;
+};
+
+const mapEquipmentPhotoRpcResult = (result, { companyId, equipmentId, expectedPhotoPath }) => {
+  const equipment = result?.equipment;
+  const previousPhotoPath = result?.previous_photo_path;
+  if (
+    !result ||
+    typeof result !== 'object' ||
+    Array.isArray(result) ||
+    !equipment ||
+    typeof equipment !== 'object' ||
+    Array.isArray(equipment) ||
+    equipment.id !== equipmentId ||
+    equipment.company_id !== companyId ||
+    equipment.photo_path !== expectedPhotoPath ||
+    !(previousPhotoPath === null || typeof previousPhotoPath === 'string')
+  ) {
+    throw new Error('equipment photo RPC returned an invalid response');
+  }
+
+  return {
+    equipment,
+    previous_photo_path: previousPhotoPath,
+  };
+};
+
+const uploadEquipmentPhotoObject = async ({ photoPath, file, mimeType }) => {
+  const { data, error } = await supabase.storage
+    .from(EQUIPMENT_PHOTO_BUCKET)
+    .upload(photoPath, file, { upsert: false, contentType: mimeType });
+  if (error) throw error;
+  if (!data || data.path !== photoPath) {
+    throw new Error('equipment photo upload returned an invalid path');
+  }
+  return data;
+};
 
 const timeEntryClockInParams = (values = {}) => ({
   p_company_id: requiredUuid(values.company_id, 'company_id'),
@@ -769,6 +917,98 @@ const createEquipmentAdapter = () => ({
     const { data, error } = await supabase.rpc('return_equipment', equipmentTransitionParams(id, companyId));
     if (error) throw error;
     return mapRpcEquipmentTransitionResult(data);
+  },
+
+  async getPhotoSignedUrl(values = {}) {
+    const { companyId, equipmentId, photoPath, expiresIn } = values;
+    const ids = normalizeEquipmentPhotoIds({ companyId, equipmentId });
+    const path = requiredEquipmentPhotoPath(photoPath, ids.companyId, ids.equipmentId);
+    const { data, error } = await supabase.storage
+      .from(EQUIPMENT_PHOTO_BUCKET)
+      .createSignedUrl(path, normalizeSignedUrlExpiry(expiresIn));
+    if (error) throw error;
+    if (!data?.signedUrl) {
+      throw new Error('equipment photo signed URL response was invalid');
+    }
+    return data.signedUrl;
+  },
+
+  async replacePhotoAdmin(values = {}) {
+    const { companyId, equipmentId, file } = values;
+    const ids = normalizeEquipmentPhotoIds({ companyId, equipmentId });
+    const { mimeType, extension } = validateEquipmentPhotoFile(file);
+    const photoPath = equipmentPhotoPath(ids.companyId, ids.equipmentId, extension);
+
+    try {
+      await uploadEquipmentPhotoObject({ photoPath, file, mimeType });
+    } catch (error) {
+      await cleanupUploadedEquipmentPhoto({
+        companyId: ids.companyId,
+        equipmentId: ids.equipmentId,
+        photoPath,
+      });
+      throw error;
+    }
+
+    let rpcResult;
+    try {
+      rpcResult = await setEquipmentPhotoAdmin({
+        companyId: ids.companyId,
+        equipmentId: ids.equipmentId,
+        photoPath,
+      });
+    } catch (error) {
+      await cleanupUploadedEquipmentPhoto({
+        companyId: ids.companyId,
+        equipmentId: ids.equipmentId,
+        photoPath,
+      });
+      throw error;
+    }
+
+    const result = mapEquipmentPhotoRpcResult(rpcResult, {
+      companyId: ids.companyId,
+      equipmentId: ids.equipmentId,
+      expectedPhotoPath: photoPath,
+    });
+
+    const cleanupWarning = await cleanupEquipmentPhotoObject({
+      companyId: ids.companyId,
+      equipmentId: ids.equipmentId,
+      photoPath: result.previous_photo_path,
+      currentPhotoPath: result.equipment.photo_path,
+    });
+
+    return {
+      ...result,
+      cleanup_warning: cleanupWarning,
+    };
+  },
+
+  async clearPhotoAdmin(values = {}) {
+    const { companyId, equipmentId } = values;
+    const ids = normalizeEquipmentPhotoIds({ companyId, equipmentId });
+    const rpcResult = await setEquipmentPhotoAdmin({
+      companyId: ids.companyId,
+      equipmentId: ids.equipmentId,
+      photoPath: null,
+    });
+    const result = mapEquipmentPhotoRpcResult(rpcResult, {
+      companyId: ids.companyId,
+      equipmentId: ids.equipmentId,
+      expectedPhotoPath: null,
+    });
+    const cleanupWarning = await cleanupEquipmentPhotoObject({
+      companyId: ids.companyId,
+      equipmentId: ids.equipmentId,
+      photoPath: result.previous_photo_path,
+      currentPhotoPath: result.equipment.photo_path,
+    });
+
+    return {
+      ...result,
+      cleanup_warning: cleanupWarning,
+    };
   },
 });
 

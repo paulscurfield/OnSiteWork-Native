@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import {
   ArrowLeftRight,
+  Camera,
   CheckCircle,
   ChevronLeft,
   Clock,
@@ -41,6 +42,8 @@ const statusConfig = {
 
 const emptyAddForm = { name: '', equipment_id: '', category: 'tools', status: 'available', notes: '' };
 const adminRoles = new Set(['owner', 'admin']);
+const equipmentPhotoTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const equipmentPhotoMaxBytes = 20 * 1024 * 1024;
 
 const resolveSupabaseCompany = (profile, companyRows) => {
   if (!profile?.id) {
@@ -54,6 +57,83 @@ const resolveSupabaseCompany = (profile, companyRows) => {
   }
   return companyRows[0];
 };
+
+function EquipmentPhotoThumbnail({ companyId, item, FallbackIcon }) {
+  const [photoState, setPhotoState] = useState({ photoPath: '', signedUrl: '', failed: false });
+  const currentPhotoPath = item?.photo_path || '';
+
+  useEffect(() => {
+    let cancelled = false;
+    const photoPath = item?.photo_path || '';
+    setPhotoState({ photoPath, signedUrl: '', failed: false });
+
+    if (!companyId || !item?.id || !photoPath) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const loadSignedUrl = async () => {
+      try {
+        const url = await onsiteApi.tables.equipment.getPhotoSignedUrl({
+          companyId,
+          equipmentId: item.id,
+          photoPath,
+        });
+        if (!cancelled) {
+          setPhotoState(current =>
+            current.photoPath === photoPath
+              ? { photoPath, signedUrl: url, failed: false }
+              : current
+          );
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.warn('Failed to load equipment photo:', error);
+          setPhotoState(current =>
+            current.photoPath === photoPath
+              ? { photoPath, signedUrl: '', failed: true }
+              : current
+          );
+        }
+      }
+    };
+
+    loadSignedUrl();
+    return () => {
+      cancelled = true;
+    };
+  }, [companyId, item?.id, item?.photo_path]);
+
+  const showPhoto = Boolean(
+    currentPhotoPath &&
+    photoState.photoPath === currentPhotoPath &&
+    photoState.signedUrl &&
+    !photoState.failed
+  );
+  const renderedPhotoPath = currentPhotoPath;
+
+  return (
+    <div className="w-12 h-12 rounded-xl bg-secondary flex items-center justify-center flex-shrink-0 overflow-hidden">
+      {showPhoto ? (
+        <img
+          src={photoState.signedUrl}
+          alt={`${item.name || 'Equipment'} equipment`}
+          className="w-full h-full object-cover"
+          onError={() => {
+            setPhotoState(current =>
+              current.photoPath === renderedPhotoPath
+                ? { ...current, failed: true }
+                : current
+            );
+          }}
+        />
+      ) : (
+        <FallbackIcon className="w-5 h-5 text-muted-foreground" />
+      )}
+    </div>
+  );
+}
 
 /**
  * @typedef {{
@@ -69,6 +149,9 @@ export default function Equipment() {
   const pageRequestIdRef = useRef(0);
   const equipmentRequestIdRef = useRef(0);
   const logsRequestIdRef = useRef(0);
+  const photoInputRef = useRef(null);
+  const photoTargetRef = useRef(null);
+  const photoActionsRef = useRef({});
 
   const [profile, setProfile] = useState(null);
   const [supabaseCompany, setSupabaseCompany] = useState(null);
@@ -79,6 +162,7 @@ export default function Equipment() {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
   const [actionLoading, setActionLoading] = useState(null);
+  const [photoActions, setPhotoActions] = useState({});
   const [editItem, setEditItem] = useState(null);
   const [editForm, setEditForm] = useState(/** @type {EquipmentEditForm} */ ({}));
   const [editSaving, setEditSaving] = useState(false);
@@ -90,6 +174,37 @@ export default function Equipment() {
   const [logsLoading, setLogsLoading] = useState(false);
 
   const isAdmin = adminRoles.has(membership?.role);
+
+  const updateEquipmentRow = (updatedItem) => {
+    setEquipment(currentEquipment =>
+      currentEquipment.map(item => item.id === updatedItem.id ? updatedItem : item)
+    );
+  };
+
+  const startPhotoAction = (equipmentId, action) => {
+    if (photoActionsRef.current[equipmentId]) return false;
+    photoActionsRef.current = {
+      ...photoActionsRef.current,
+      [equipmentId]: action,
+    };
+    setPhotoActions(current => ({
+      ...current,
+      [equipmentId]: action,
+    }));
+    equipmentRequestIdRef.current += 1;
+    return true;
+  };
+
+  const finishPhotoAction = (equipmentId) => {
+    const nextActions = { ...photoActionsRef.current };
+    delete nextActions[equipmentId];
+    photoActionsRef.current = nextActions;
+    setPhotoActions(current => {
+      const next = { ...current };
+      delete next[equipmentId];
+      return next;
+    });
+  };
 
   const refreshEquipment = useCallback(async () => {
     if (!supabaseCompany?.id) return;
@@ -277,6 +392,100 @@ export default function Equipment() {
       toast.error('Failed to delete equipment');
     } finally {
       setActionLoading(null);
+    }
+  };
+
+  const validateSelectedPhoto = (file) => {
+    const size = Number(file?.size);
+    if (!Number.isFinite(size) || size <= 0) {
+      toast.error('Photo file is empty');
+      return false;
+    }
+    if (size > equipmentPhotoMaxBytes) {
+      toast.error('Photo must be 20 MB or smaller');
+      return false;
+    }
+    const mimeType = typeof file?.type === 'string' ? file.type.trim() : '';
+    if (!equipmentPhotoTypes.has(mimeType)) {
+      toast.error('Photo must be JPEG, PNG or WebP');
+      return false;
+    }
+    return true;
+  };
+
+  const openPhotoPicker = (item) => {
+    if (!isAdmin) return;
+    if (photoActionsRef.current[item.id]) return;
+    photoTargetRef.current = item;
+    if (photoInputRef.current) {
+      photoInputRef.current.value = '';
+      photoInputRef.current.click();
+    }
+  };
+
+  const handlePhotoFileChange = async (event) => {
+    const file = event.target.files?.[0];
+    const item = photoTargetRef.current;
+    photoTargetRef.current = null;
+
+    if (event.target) {
+      event.target.value = '';
+    }
+    if (!file || !item) return;
+    if (!isAdmin) return;
+    if (!supabaseCompany?.id) {
+      toast.error('Supabase company is not ready yet');
+      return;
+    }
+    if (!validateSelectedPhoto(file)) return;
+    if (!startPhotoAction(item.id, 'replace')) return;
+
+    try {
+      const result = await onsiteApi.tables.equipment.replacePhotoAdmin({
+        companyId: supabaseCompany.id,
+        equipmentId: item.id,
+        file,
+      });
+      equipmentRequestIdRef.current += 1;
+      updateEquipmentRow(result.equipment);
+      toast.success(item.photo_path ? 'Photo updated' : 'Photo added');
+      if (result.cleanup_warning) {
+        toast.warning(result.cleanup_warning);
+      }
+    } catch (error) {
+      console.error('Failed to update Supabase equipment photo:', error);
+      toast.error('Failed to update equipment photo');
+      await refreshEquipment();
+    } finally {
+      finishPhotoAction(item.id);
+    }
+  };
+
+  const handleClearPhoto = async (item) => {
+    if (!isAdmin || !item?.photo_path) return;
+    if (!supabaseCompany?.id) {
+      toast.error('Supabase company is not ready yet');
+      return;
+    }
+    if (!startPhotoAction(item.id, 'clear')) return;
+
+    try {
+      const result = await onsiteApi.tables.equipment.clearPhotoAdmin({
+        companyId: supabaseCompany.id,
+        equipmentId: item.id,
+      });
+      equipmentRequestIdRef.current += 1;
+      updateEquipmentRow(result.equipment);
+      toast.success('Photo removed');
+      if (result.cleanup_warning) {
+        toast.warning(result.cleanup_warning);
+      }
+    } catch (error) {
+      console.error('Failed to remove Supabase equipment photo:', error);
+      toast.error('Failed to remove equipment photo');
+      await refreshEquipment();
+    } finally {
+      finishPhotoAction(item.id);
     }
   };
 
@@ -529,6 +738,16 @@ export default function Equipment() {
         document.body
       )}
 
+      {isAdmin && (
+        <input
+          ref={photoInputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          className="hidden"
+          onChange={handlePhotoFileChange}
+        />
+      )}
+
       {tab === 'history' && (
         <div className="px-6 space-y-3">
           {logsLoading ? (
@@ -584,13 +803,12 @@ export default function Equipment() {
           const Icon = categoryIcons[item.category] || Package;
           const sc = statusConfig[item.status] || statusConfig.available;
           const isMyCheckout = item.checked_out_by_id === profile?.id;
+          const isPhotoBusy = Boolean(photoActions[item.id]);
 
           return (
             <div key={item.id} className="bg-card border border-border rounded-2xl p-4">
               <div className="flex items-start gap-3">
-                <div className="w-12 h-12 rounded-xl bg-secondary flex items-center justify-center flex-shrink-0">
-                  <Icon className="w-5 h-5 text-muted-foreground" />
-                </div>
+                <EquipmentPhotoThumbnail companyId={supabaseCompany?.id} item={item} FallbackIcon={Icon} />
                 <div className="flex-1 min-w-0">
                   <div className="flex items-start justify-between gap-2">
                     <div>
@@ -650,6 +868,28 @@ export default function Equipment() {
                         <CheckCircle className="w-3.5 h-3.5" />
                         Return
                       </button>
+                    )}
+                    {isAdmin && (
+                      <>
+                        <button
+                          onClick={() => openPhotoPicker(item)}
+                          disabled={isPhotoBusy}
+                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-secondary text-muted-foreground text-xs font-semibold transition-all active:scale-95 disabled:opacity-60"
+                        >
+                          <Camera className="w-3.5 h-3.5" />
+                          {item.photo_path ? 'Change Photo' : 'Add Photo'}
+                        </button>
+                        {item.photo_path && (
+                          <button
+                            onClick={() => handleClearPhoto(item)}
+                            disabled={isPhotoBusy}
+                            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-secondary text-muted-foreground text-xs font-semibold transition-all active:scale-95 disabled:opacity-60"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                            Remove Photo
+                          </button>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>

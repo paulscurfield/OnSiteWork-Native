@@ -413,15 +413,15 @@ const requiredEquipmentPhotoPath = (photoPath, companyId, equipmentId) => {
 };
 
 const normalizeEquipmentPhotoIds = ({ companyId, equipmentId }) => ({
-  companyId: requiredUuid(companyId, 'company_id'),
-  equipmentId: requiredUuid(equipmentId, 'equipment_id'),
+  companyId: requiredUuid(companyId, 'company_id').toLowerCase(),
+  equipmentId: requiredUuid(equipmentId, 'equipment_id').toLowerCase(),
 });
 
 const normalizeSignedUrlExpiry = (expiresIn) => {
   if (expiresIn === undefined || expiresIn === null) return 3600;
   const seconds = Number(expiresIn);
-  if (!Number.isInteger(seconds) || seconds <= 0) {
-    throw new Error('expiresIn must be a positive integer');
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3600) {
+    throw new Error('expiresIn must be an integer between 1 and 3600 seconds');
   }
   return seconds;
 };

@@ -1,10 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { base44 } from '@/api/base44Client';
-import { useCompany } from '@/lib/companyContext';
 import { ChevronLeft, Check, AlertTriangle, Loader2 } from 'lucide-react';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
+import { onsiteApi } from '@/api/supabase/adapter';
 
 const QUESTIONS = [
   {
@@ -165,50 +164,155 @@ const QUESTIONS = [
   }
 ];
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const requireSupabaseUuid = (value, label) => {
+  const trimmed = String(value || '').trim();
+  if (!UUID_PATTERN.test(trimmed)) {
+    throw new Error(`${label} must be a valid Supabase UUID.`);
+  }
+  return trimmed;
+};
+
+const resolveSingleCompany = (profile, companyRows) => {
+  if (!profile?.id) {
+    throw new Error('You must be signed in to complete a pre-start.');
+  }
+  if (companyRows.length === 0) {
+    throw new Error('No Supabase company is available for this account.');
+  }
+  if (companyRows.length > 1) {
+    throw new Error('Multiple Supabase companies found. Company selection is required before completing a pre-start.');
+  }
+  return companyRows[0];
+};
+
 export default function PreStart() {
   const navigate = useNavigate();
-  const { company } = useCompany();
-  const [user, setUser] = useState(null);
+  const loadRequestIdRef = useRef(0);
+  const mountedRef = useRef(true);
+  const savingRef = useRef(false);
+  const [supabaseCompany, setSupabaseCompany] = useState(null);
   const [equipment, setEquipment] = useState(null);
   const [activeJob, setActiveJob] = useState(null);
   const [jobs, setJobs] = useState([]);
   const [selectedJobId, setSelectedJobId] = useState('');
   const [answers, setAnswers] = useState({});
   const [generalComments, setGeneralComments] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      loadRequestIdRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    const requestId = loadRequestIdRef.current + 1;
+    loadRequestIdRef.current = requestId;
+
     const init = async () => {
+      setLoading(true);
+      setLoadError('');
+      setSupabaseCompany(null);
+      setEquipment(null);
       setActiveJob(null);
       setJobs([]);
       setSelectedJobId('');
 
-      const u = await base44.auth.me().catch(() => null);
-      setUser(u);
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const equipmentParam = params.get('equipment_id');
+        if (!equipmentParam) {
+          throw new Error('Equipment is required to complete a pre-start.');
+        }
+        const equipmentId = requireSupabaseUuid(equipmentParam, 'Equipment ID');
 
-      const params = new URLSearchParams(window.location.search);
-      const equipId = params.get('equipment_id');
-      if (equipId) {
-        const results = await base44.entities.Equipment.filter({ id: equipId }).catch(() => []);
-        if (results.length > 0) setEquipment(results[0]);
-      }
+        const [profile, companyRows] = await Promise.all([
+          onsiteApi.auth.me(),
+          onsiteApi.tables.companies.list('name'),
+        ]);
+        if (requestId !== loadRequestIdRef.current) return;
 
-      if (u && company?.id) {
-        const allJobs = await base44.entities.Job.filter({
-          company_id: company.id,
-          status: 'active',
-        }).catch(() => []);
-        setJobs(allJobs);
+        const resolvedCompany = resolveSingleCompany(profile, companyRows);
+        const memberRows = await onsiteApi.tables.companyMembers.filter({
+          company_id: resolvedCompany.id,
+          user_id: profile.id,
+        });
+        if (requestId !== loadRequestIdRef.current) return;
 
-        const active = await base44.entities.TimeEntry.filter({ company_id: company.id, worker_email: u.email, status: 'active' }).catch(() => []);
-        if (active.length > 0) {
-          setActiveJob({ id: active[0].job_id, name: active[0].job_name, number: active[0].job_number });
-          setSelectedJobId(active[0].job_id);
+        if (!memberRows[0]) {
+          throw new Error('Your Supabase company membership could not be confirmed.');
+        }
+
+        const [equipmentRows, activeJobs, activeTimeEntry] = await Promise.all([
+          onsiteApi.tables.equipment.filter({
+            company_id: resolvedCompany.id,
+            id: equipmentId,
+          }),
+          onsiteApi.tables.jobs.filter({
+            company_id: resolvedCompany.id,
+            status: 'active',
+          }),
+          onsiteApi.tables.timeEntries.getMyActive(resolvedCompany.id),
+        ]);
+        if (requestId !== loadRequestIdRef.current) return;
+
+        const resolvedEquipment = equipmentRows[0];
+        if (!resolvedEquipment) {
+          throw new Error('Equipment is unavailable or you do not have access to it.');
+        }
+
+        let resolvedActiveJob = null;
+        if (activeTimeEntry && !activeTimeEntry.job_id) {
+          throw new Error('Your active clocked-in job could not be resolved safely.');
+        }
+        if (activeTimeEntry?.job_id) {
+          const activeJobId = activeTimeEntry.job_id;
+          resolvedActiveJob = activeJobs.find(job => job['id'] === activeJobId) || null;
+          if (!resolvedActiveJob) {
+            const activeJobRows = await onsiteApi.tables.jobs.filter({
+              company_id: resolvedCompany.id,
+              id: activeTimeEntry.job_id,
+            });
+            if (requestId !== loadRequestIdRef.current) return;
+            resolvedActiveJob = activeJobRows[0] || null;
+          }
+          if (!resolvedActiveJob) {
+            throw new Error('Your active clocked-in job could not be resolved safely.');
+          }
+        }
+
+        setSupabaseCompany(resolvedCompany);
+        setEquipment(resolvedEquipment);
+        setJobs(activeJobs);
+        setActiveJob(resolvedActiveJob);
+        setSelectedJobId(resolvedActiveJob?.['id'] || '');
+      } catch (error) {
+        if (requestId !== loadRequestIdRef.current) return;
+        console.error('Failed to load Supabase pre-start page:', error);
+        setLoadError(error?.message || 'Failed to load pre-start checklist.');
+        setSupabaseCompany(null);
+        setEquipment(null);
+        setActiveJob(null);
+        setJobs([]);
+        setSelectedJobId('');
+      } finally {
+        if (requestId === loadRequestIdRef.current) {
+          setLoading(false);
         }
       }
     };
+
     init();
-  }, [company]);
+    return () => {
+      loadRequestIdRef.current += 1;
+    };
+  }, []);
 
   const selectedJob = activeJob || jobs.find(job => job.id === selectedJobId) || null;
 
@@ -223,6 +327,11 @@ export default function PreStart() {
   });
 
   const handleSubmit = async () => {
+    if (savingRef.current) return;
+    if (loading || loadError || !supabaseCompany || !equipment) {
+      toast.error('Pre-start checklist is not ready to submit.');
+      return;
+    }
     if (!allAnswered) {
       toast.error('Please answer all questions before submitting.');
       return;
@@ -231,9 +340,9 @@ export default function PreStart() {
       toast.error('Please select a job site before submitting.');
       return;
     }
+    savingRef.current = true;
     setSaving(true);
 
-    // Check if any answer is a fault
     const hasFaults = QUESTIONS.some(q => {
       if (q.isTextArea || q.isTextInput) return false;
       const selectedLabel = answers[q.id];
@@ -241,26 +350,69 @@ export default function PreStart() {
       return selectedOption?.fault === true;
     });
 
-    await base44.entities.PreStart.create({
-      company_id: company?.id,
-      equipment_id: equipment?.id || '',
-      equipment_name: equipment?.name || 'Unknown',
-      worker_email: user?.email || '',
-      worker_name: user?.full_name || '',
-      job_id: selectedJob.id,
-      job_name: selectedJob.name || selectedJob.job_name || '',
-      job_number: selectedJob.number || selectedJob.job_number || '',
-      date: format(new Date(), 'yyyy-MM-dd'),
-      answers,
-      general_comments: generalComments,
-      has_faults: hasFaults,
-      status: hasFaults ? 'fault' : 'pass',
-    });
+    try {
+      await onsiteApi.tables.preStarts.createWorker({
+        company_id: supabaseCompany.id,
+        equipment_id: equipment.id,
+        job_id: selectedJob.id,
+        date: format(new Date(), 'yyyy-MM-dd'),
+        answers,
+        general_comments: generalComments,
+        has_faults: hasFaults,
+      });
 
-    toast.success('Pre-start submitted!');
-    setSaving(false);
-    navigate('/equipment');
+      if (!mountedRef.current) return;
+      toast.success('Pre-start submitted!');
+      navigate('/equipment');
+    } catch (error) {
+      if (!mountedRef.current) return;
+      console.error('Failed to submit Supabase pre-start:', error);
+      toast.error('Failed to submit pre-start');
+    } finally {
+      savingRef.current = false;
+      if (mountedRef.current) {
+        setSaving(false);
+      }
+    }
   };
+
+  const submitDisabled = saving || loading || Boolean(loadError) || !allAnswered || !selectedJob || !equipment || !supabaseCompany;
+
+  if (loading || loadError) {
+    return (
+      <div className="min-h-screen bg-background">
+        <div className="px-6 pt-14 pb-4 flex items-center gap-4 sticky top-0 bg-background z-10 border-b border-border">
+          <button onClick={() => navigate('/equipment')}
+            className="w-9 h-9 rounded-xl bg-secondary flex items-center justify-center flex-shrink-0">
+            <ChevronLeft className="w-5 h-5" />
+          </button>
+          <div className="flex-1 min-w-0">
+            <h1 className="text-lg font-black truncate">Pre-Start Checklist</h1>
+          </div>
+        </div>
+        <div className="px-6 py-12 flex flex-col items-center justify-center text-center">
+          {loading ? (
+            <>
+              <Loader2 className="w-8 h-8 animate-spin text-primary mb-4" />
+              <p className="text-sm text-muted-foreground">Loading pre-start checklist...</p>
+            </>
+          ) : (
+            <>
+              <AlertTriangle className="w-8 h-8 text-red-400 mb-4" />
+              <p className="font-bold text-sm mb-2">Pre-start unavailable</p>
+              <p className="text-sm text-muted-foreground max-w-sm">{loadError}</p>
+              <button
+                onClick={() => navigate('/equipment')}
+                className="mt-6 px-4 py-2 rounded-xl bg-secondary text-sm font-semibold"
+              >
+                Back to Equipment
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background">
@@ -272,7 +424,7 @@ export default function PreStart() {
         </button>
         <div className="flex-1 min-w-0">
           <h1 className="text-lg font-black truncate">Pre-Start Checklist</h1>
-          {equipment && <p className="text-xs text-primary font-semibold truncate">{equipment.name} · #{equipment.equipment_id}{selectedJob ? ` · ${selectedJob.name || selectedJob.job_name}` : ''}</p>}
+          {equipment && <p className="text-xs text-primary font-semibold truncate">{equipment.name} · #{equipment.equipment_id}{selectedJob ? ` · ${selectedJob.job_name}` : ''}</p>}
         </div>
       </div>
 
@@ -295,7 +447,7 @@ export default function PreStart() {
           {activeJob ? (
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-green-400 flex-shrink-0" />
-              <p className="font-bold text-sm">{activeJob.name}{activeJob.number ? ` #${activeJob.number}` : ''}</p>
+              <p className="font-bold text-sm">{activeJob.job_name}{activeJob.job_number ? ` #${activeJob.job_number}` : ''}</p>
               <span className="text-[10px] bg-green-500/15 text-green-400 px-2 py-0.5 rounded-full font-semibold ml-auto">Clocked In</span>
             </div>
           ) : (
@@ -311,6 +463,9 @@ export default function PreStart() {
                   <option key={job.id} value={job.id}>{job.job_name}{job.job_number ? ` #${job.job_number}` : ''}</option>
                 ))}
               </select>
+              {jobs.length === 0 && (
+                <p className="text-xs text-muted-foreground mt-2">No active jobs available.</p>
+              )}
             </div>
           )}
         </div>
@@ -372,14 +527,17 @@ export default function PreStart() {
 
       {/* Submit Button */}
       <div className="fixed bottom-0 left-0 right-0 px-4 pt-4 pb-8 bg-background border-t-2 border-border shadow-[0_-4px_20px_rgba(0,0,0,0.3)]">
-        <button onClick={handleSubmit} disabled={saving || !allAnswered}
+        <button onClick={handleSubmit} disabled={submitDisabled}
           className="w-full py-5 rounded-2xl font-black text-lg flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-50 disabled:bg-secondary disabled:text-muted-foreground"
-          style={allAnswered ? { backgroundColor: '#10B981', color: '#000' } : {}}>
+          style={!submitDisabled ? { backgroundColor: '#10B981', color: '#000' } : {}}>
           {saving ? <Loader2 className="w-6 h-6 animate-spin" /> : <Check className="w-6 h-6" />}
           {saving ? 'Submitting...' : 'Submit Pre-Start'}
         </button>
         {!allAnswered && (
           <p className="text-center text-xs text-muted-foreground mt-2">Answer all questions to submit</p>
+        )}
+        {allAnswered && !selectedJob && (
+          <p className="text-center text-xs text-muted-foreground mt-2">Select a job site to submit</p>
         )}
       </div>
     </div>

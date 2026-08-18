@@ -855,6 +855,13 @@ export default function Equipment() {
                   )}
 
                   <div className="mt-3 flex flex-wrap gap-2">
+                    <Link
+                      to={`/prestart?equipment_id=${encodeURIComponent(item.id)}`}
+                      className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-secondary text-muted-foreground text-xs font-semibold transition-all active:scale-95"
+                    >
+                      <CheckCircle className="w-3.5 h-3.5" />
+                      Pre-Start
+                    </Link>
                     {item.status === 'available' && (
                       <button onClick={() => handleCheckout(item)} disabled={actionLoading === item.id}
                         className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-primary/15 text-primary text-xs font-semibold transition-all active:scale-95 disabled:opacity-60">

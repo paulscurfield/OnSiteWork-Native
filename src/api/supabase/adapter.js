@@ -19,6 +19,8 @@ const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 const JOB_STATUS_VALUES = new Set(['active', 'completed', 'on_hold']);
+const LEAVE_TYPE_VALUES = new Set(['annual', 'sick', 'personal', 'other']);
+const LEAVE_REVIEW_STATUS_VALUES = new Set(['approved', 'declined']);
 const EQUIPMENT_CATEGORY_VALUES = new Set(['machinery', 'tools', 'vehicle', 'safety', 'electrical', 'other']);
 const EQUIPMENT_ADMIN_STATUS_VALUES = new Set(['available', 'maintenance']);
 const EQUIPMENT_PHOTO_BUCKET = 'equipment-photos';
@@ -298,6 +300,14 @@ const mapRpcPreStartResult = (result) => {
   return preStart;
 };
 
+const mapRpcLeaveRequestResult = (result, rpcName) => {
+  const leaveRequest = result?.leave_request;
+  if (!leaveRequest || typeof leaveRequest !== 'object' || Array.isArray(leaveRequest)) {
+    throw new Error(`${rpcName} returned an invalid response`);
+  }
+  return leaveRequest;
+};
+
 const mapRpcEquipmentTransitionResult = (result) => {
   const equipment = result?.equipment;
   const log = result?.log;
@@ -343,6 +353,48 @@ const preStartCreateParams = (values = {}) => ({
   p_answers: requiredJson(values.answers, 'answers'),
   p_general_comments: optionalText(values.general_comments) ?? null,
   p_has_faults: requiredBoolean(values.has_faults, 'has_faults'),
+});
+
+const normalizeLeaveType = (value) => {
+  const leaveType = requiredText(value, 'leave_type');
+  if (!LEAVE_TYPE_VALUES.has(leaveType)) {
+    throw new Error('leave_type must be annual, sick, personal, or other');
+  }
+  return leaveType;
+};
+
+const normalizeLeaveReviewStatus = (value) => {
+  const status = requiredText(value, 'status');
+  if (!LEAVE_REVIEW_STATUS_VALUES.has(status)) {
+    throw new Error('review status must be approved or declined');
+  }
+  return status;
+};
+
+const ensureDateRange = (startDate, endDate) => {
+  if (endDate < startDate) {
+    throw new Error('end_date cannot be before start_date');
+  }
+};
+
+const leaveCreateWorkerParams = (values = {}) => {
+  const startDate = toDateOnly(values.start_date, 'start_date');
+  const endDate = toDateOnly(values.end_date, 'end_date');
+  ensureDateRange(startDate, endDate);
+
+  return {
+    p_company_id: requiredUuid(values.company_id, 'company_id'),
+    p_leave_type: normalizeLeaveType(values.leave_type),
+    p_start_date: startDate,
+    p_end_date: endDate,
+    p_notes: optionalText(values.notes) ?? null,
+  };
+};
+
+const leaveReviewAdminParams = (id, values = {}) => ({
+  p_company_id: requiredUuid(values.company_id, 'company_id'),
+  p_leave_request_id: requiredUuid(id, 'leave_request_id'),
+  p_status: normalizeLeaveReviewStatus(values.status),
 });
 
 const normalizeEquipmentCategory = (value) => {
@@ -1006,6 +1058,54 @@ const createPreStartsAdapter = () => ({
   },
 });
 
+const createLeaveRequestsAdapter = () => ({
+  async list(orderBy, limit) {
+    let query = supabase.from('leave_requests').select('*');
+    query = orderQuery(query, orderBy);
+    if (limit) query = query.limit(limit);
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
+  },
+
+  async filter(filters = {}, orderBy, limit) {
+    let query = supabase.from('leave_requests').select('*');
+    query = applyFilters(query, filters);
+    query = orderQuery(query, orderBy);
+    if (limit) query = query.limit(limit);
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
+  },
+
+  async create() {
+    throw new Error('Use leaveRequests.createWorker() so LeaveRequest creation uses the secure RPC');
+  },
+
+  async update() {
+    throw new Error('Use leaveRequests.reviewAdmin() so LeaveRequest reviews use the secure RPC');
+  },
+
+  async createWorker(values) {
+    const { data, error } = await supabase.rpc('create_leave_request_worker', leaveCreateWorkerParams(values));
+    if (error) throw error;
+    return mapRpcLeaveRequestResult(data, 'create_leave_request_worker');
+  },
+
+  async reviewAdmin(id, values) {
+    const { data, error } = await supabase.rpc('review_leave_request_admin', leaveReviewAdminParams(id, values));
+    if (error) throw error;
+    return mapRpcLeaveRequestResult(data, 'review_leave_request_admin');
+  },
+
+  async delete(id) {
+    const leaveRequestId = requiredUuid(id, 'leave_request_id');
+    const { error } = await supabase.from('leave_requests').delete().eq('id', leaveRequestId);
+    if (error) throw error;
+    return true;
+  },
+});
+
 const createJobPhotosAdapter = () => ({
   async list() {
     throw new Error('Use jobPhotos.filter({ company_id }) so Site Photos remain company-scoped');
@@ -1437,7 +1537,7 @@ export const onsiteApi = {
     equipmentLogs: createEquipmentLogsAdapter(),
     preStarts: createPreStartsAdapter(),
     jobPhotos: createJobPhotosAdapter(),
-    leaveRequests: createTableAdapter('leave_requests'),
+    leaveRequests: createLeaveRequestsAdapter(),
     jobSchedules: createJobSchedulesAdapter(),
     messages: createTableAdapter('messages'),
     messageReads: createTableAdapter('message_reads'),

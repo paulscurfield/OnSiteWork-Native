@@ -108,6 +108,7 @@ export default function Admin() {
   const adminJobsRequestIdRef = useRef(0);
   const timeEntriesRequestIdRef = useRef(0);
   const photosRequestIdRef = useRef(0);
+  const preStartsRequestIdRef = useRef(0);
   const [user, setUser] = useState(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [activeTab, setActiveTab] = useState('Jobs');
@@ -147,6 +148,8 @@ export default function Admin() {
   const [photoFilter, setPhotoFilter] = useState('');
   const [lightboxPhoto, setLightboxPhoto] = useState(null);
   const [preStarts, setPreStarts] = useState([]);
+  const [preStartsLoading, setPreStartsLoading] = useState(false);
+  const [preStartsError, setPreStartsError] = useState('');
   const [preStartFilter, setPreStartFilter] = useState('');
   const [expandedPreStart, setExpandedPreStart] = useState(null);
   const [showPreStartEmailModal, setShowPreStartEmailModal] = useState(false);
@@ -180,7 +183,12 @@ export default function Admin() {
         photosRequestIdRef.current += 1;
       };
     }
-    if (activeTab === 'Pre-Starts') loadPreStarts();
+    if (activeTab === 'Pre-Starts') {
+      loadPreStarts();
+      return () => {
+        preStartsRequestIdRef.current += 1;
+      };
+    }
   }, [activeTab, weekStart, company]);
 
   const loadPhotos = async () => {
@@ -352,8 +360,37 @@ OnSite Timesheet`;
   const PRESTART_QUESTIONS = Array.from({ length: 19 }, (_, i) => i + 2);
 
   const loadPreStarts = async () => {
-    const all = await base44.entities.PreStart.filter({ company_id: company?.id }, '-created_date', 200);
-    setPreStarts(all);
+    const requestId = preStartsRequestIdRef.current + 1;
+    preStartsRequestIdRef.current = requestId;
+    setPreStartsLoading(true);
+    setPreStartsError('');
+    setPreStarts([]);
+    setExpandedPreStart(null);
+    setSelectedPreStarts([]);
+    setPreStartSelectMode(false);
+
+    try {
+      const resolvedCompany = await resolveAdminSupabaseCompany();
+      const rows = await onsiteApi.tables.preStarts.filter(
+        { company_id: resolvedCompany.id },
+        '-created_at',
+        200
+      );
+      if (preStartsRequestIdRef.current !== requestId) return;
+      setPreStarts(rows);
+    } catch (error) {
+      console.error('Failed to load Pre-Starts', error);
+      if (preStartsRequestIdRef.current !== requestId) return;
+      setPreStartsError('Pre-Starts are unavailable. Try again later.');
+      setPreStarts([]);
+      setExpandedPreStart(null);
+      setSelectedPreStarts([]);
+      setPreStartSelectMode(false);
+    } finally {
+      if (preStartsRequestIdRef.current === requestId) {
+        setPreStartsLoading(false);
+      }
+    }
   };
 
   const resolveAdminSupabaseCompany = async () => {
@@ -1492,6 +1529,7 @@ OnSite Timesheet`;
             <select
               value={preStartFilter}
               onChange={e => setPreStartFilter(e.target.value)}
+              disabled={preStartsLoading}
               className="flex-1 bg-card border border-border rounded-xl px-3 py-2 text-sm outline-none"
             >
               <option value="">All Workers</option>
@@ -1505,11 +1543,13 @@ OnSite Timesheet`;
             </p>
           </div>
           <div className="flex gap-2 mb-4">
-            <button onClick={exportPreStartsCSV} className="flex-1 py-3 rounded-2xl bg-green-500/15 border border-green-500/30 text-green-400 font-bold flex items-center justify-center gap-2 text-sm">
+            <button onClick={exportPreStartsCSV} disabled={preStartsLoading || Boolean(preStartsError)}
+              className="flex-1 py-3 rounded-2xl bg-green-500/15 border border-green-500/30 text-green-400 font-bold flex items-center justify-center gap-2 text-sm disabled:opacity-60">
               <Download className="w-4 h-4" />
               Export CSV
             </button>
             <button
+              disabled={preStartsLoading || Boolean(preStartsError)}
               onClick={() => {
                 if (preStartSelectMode) {
                   if (selectedPreStarts.length === 0) { setPreStartSelectMode(false); return; }
@@ -1523,7 +1563,7 @@ OnSite Timesheet`;
                 preStartSelectMode && selectedPreStarts.length > 0
                   ? 'bg-purple-500/80 border-purple-500 text-white'
                   : 'bg-purple-500/15 border-purple-500/30 text-purple-400'
-              }`}>
+              } disabled:opacity-60`}>
               <Mail className="w-4 h-4" />
               {preStartSelectMode
                 ? selectedPreStarts.length > 0
@@ -1540,10 +1580,26 @@ OnSite Timesheet`;
             )}
           </div>
 
-          {preStarts.length === 0 ? (
+          {preStartsLoading ? (
+            <div className="text-center py-16">
+              <Loader2 className="w-10 h-10 text-primary mx-auto mb-3 animate-spin" />
+              <p className="text-muted-foreground text-sm">Loading pre-starts...</p>
+            </div>
+          ) : preStartsError ? (
+            <div className="text-center py-16">
+              <AlertTriangle className="w-12 h-12 text-destructive/60 mx-auto mb-3" />
+              <p className="text-muted-foreground text-sm">Pre-Starts unavailable</p>
+              <p className="text-muted-foreground/60 text-xs mt-1">{preStartsError}</p>
+            </div>
+          ) : preStarts.length === 0 ? (
             <div className="text-center py-16">
               <div className="text-5xl mb-3">📋</div>
               <p className="text-muted-foreground text-sm">No pre-starts submitted yet</p>
+            </div>
+          ) : preStarts.filter(p => !preStartFilter || p.worker_email === preStartFilter).length === 0 ? (
+            <div className="text-center py-16">
+              <div className="text-5xl mb-3">📋</div>
+              <p className="text-muted-foreground text-sm">No pre-starts for this worker.</p>
             </div>
           ) : (
             <div className="space-y-3">

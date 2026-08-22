@@ -21,6 +21,7 @@ const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 const JOB_STATUS_VALUES = new Set(['active', 'completed', 'on_hold']);
 const LEAVE_TYPE_VALUES = new Set(['annual', 'sick', 'personal', 'other']);
 const LEAVE_REVIEW_STATUS_VALUES = new Set(['approved', 'declined']);
+const MESSAGE_TYPE_VALUES = new Set(['direct', 'broadcast']);
 const EQUIPMENT_CATEGORY_VALUES = new Set(['machinery', 'tools', 'vehicle', 'safety', 'electrical', 'other']);
 const EQUIPMENT_ADMIN_STATUS_VALUES = new Set(['available', 'maintenance']);
 const EQUIPMENT_PHOTO_BUCKET = 'equipment-photos';
@@ -308,6 +309,37 @@ const mapRpcLeaveRequestResult = (result, rpcName) => {
   return leaveRequest;
 };
 
+const mapRpcMessageResult = (result, rpcName) => {
+  const message = result?.message;
+  if (!message || typeof message !== 'object' || Array.isArray(message)) {
+    throw new Error(`${rpcName} returned an invalid response`);
+  }
+  return message;
+};
+
+const mapRpcMailboxResult = (result) => {
+  if (!Array.isArray(result?.messages)) {
+    throw new Error('get_message_mailbox returned an invalid response');
+  }
+  return result.messages;
+};
+
+const mapRpcMessageReadResult = (result) => {
+  const messageRead = result?.message_read;
+  if (!messageRead || typeof messageRead !== 'object' || Array.isArray(messageRead)) {
+    throw new Error('mark_message_read returned an invalid response');
+  }
+  return messageRead;
+};
+
+const mapRpcUnreadCountResult = (result) => {
+  const unreadCount = Number(result?.unread_count);
+  if (!Number.isInteger(unreadCount) || unreadCount < 0) {
+    throw new Error('get_unread_message_count returned an invalid response');
+  }
+  return unreadCount;
+};
+
 const mapRpcEquipmentTransitionResult = (result) => {
   const equipment = result?.equipment;
   const log = result?.log;
@@ -395,6 +427,39 @@ const leaveReviewAdminParams = (id, values = {}) => ({
   p_company_id: requiredUuid(values.company_id, 'company_id'),
   p_leave_request_id: requiredUuid(id, 'leave_request_id'),
   p_status: normalizeLeaveReviewStatus(values.status),
+});
+
+const normalizeMessageType = (value) => {
+  const messageType = requiredText(value, 'message_type');
+  if (!MESSAGE_TYPE_VALUES.has(messageType)) {
+    throw new Error('message_type must be direct or broadcast');
+  }
+  return messageType;
+};
+
+const messageSendMemberParams = (values = {}) => {
+  const messageType = normalizeMessageType(values.message_type);
+  const recipientId = optionalUuid(values.recipient_id, 'recipient_id');
+
+  if (messageType === 'direct' && !recipientId) {
+    throw new Error('recipient_id is required for direct messages');
+  }
+  if (messageType === 'broadcast' && recipientId) {
+    throw new Error('recipient_id must be empty for broadcast messages');
+  }
+
+  return {
+    p_company_id: requiredUuid(values.company_id, 'company_id'),
+    p_message_type: messageType,
+    p_recipient_id: messageType === 'direct' ? recipientId : null,
+    p_subject: optionalText(values.subject) ?? null,
+    p_body: requiredText(values.body, 'body'),
+  };
+};
+
+const messageMarkReadParams = (id, values = {}) => ({
+  p_company_id: requiredUuid(values.company_id, 'company_id'),
+  p_message_id: requiredUuid(id, 'message_id'),
 });
 
 const normalizeEquipmentCategory = (value) => {
@@ -1106,6 +1171,78 @@ const createLeaveRequestsAdapter = () => ({
   },
 });
 
+const createMessagesAdapter = () => ({
+  async list() {
+    throw new Error('Use messages.mailbox(companyId) so Messages are resolved through the secure RPC');
+  },
+
+  async filter() {
+    throw new Error('Use messages.mailbox(companyId) so Messages are resolved through the secure RPC');
+  },
+
+  async create() {
+    throw new Error('Use messages.sendMember() so Messages are created through the secure RPC');
+  },
+
+  async update() {
+    throw new Error('Use messages.markRead() so Message read state is written through the secure RPC');
+  },
+
+  async delete() {
+    throw new Error('Message deletion is not supported by the secure Messages adapter');
+  },
+
+  async mailbox(companyId) {
+    const { data, error } = await supabase.rpc('get_message_mailbox', {
+      p_company_id: requiredUuid(companyId, 'company_id'),
+    });
+    if (error) throw error;
+    return mapRpcMailboxResult(data);
+  },
+
+  async sendMember(values) {
+    const { data, error } = await supabase.rpc('create_message_member', messageSendMemberParams(values));
+    if (error) throw error;
+    return mapRpcMessageResult(data, 'create_message_member');
+  },
+
+  async markRead(id, values = {}) {
+    const { data, error } = await supabase.rpc('mark_message_read', messageMarkReadParams(id, values));
+    if (error) throw error;
+    return mapRpcMessageReadResult(data);
+  },
+
+  async unreadCount(companyId) {
+    const { data, error } = await supabase.rpc('get_unread_message_count', {
+      p_company_id: requiredUuid(companyId, 'company_id'),
+    });
+    if (error) throw error;
+    return mapRpcUnreadCountResult(data);
+  },
+});
+
+const createMessageReadsAdapter = () => ({
+  async list() {
+    throw new Error('Direct messageReads access is unsupported; use messages.mailbox() or messages.markRead()');
+  },
+
+  async filter() {
+    throw new Error('Direct messageReads access is unsupported; use messages.mailbox() or messages.markRead()');
+  },
+
+  async create() {
+    throw new Error('Use messages.markRead() so Message read receipts use the secure RPC');
+  },
+
+  async update() {
+    throw new Error('Message read receipt updates are unsupported');
+  },
+
+  async delete() {
+    throw new Error('Message read receipt deletion is unsupported');
+  },
+});
+
 const createJobPhotosAdapter = () => ({
   async list() {
     throw new Error('Use jobPhotos.filter({ company_id }) so Site Photos remain company-scoped');
@@ -1539,8 +1676,8 @@ export const onsiteApi = {
     jobPhotos: createJobPhotosAdapter(),
     leaveRequests: createLeaveRequestsAdapter(),
     jobSchedules: createJobSchedulesAdapter(),
-    messages: createTableAdapter('messages'),
-    messageReads: createTableAdapter('message_reads'),
+    messages: createMessagesAdapter(),
+    messageReads: createMessageReadsAdapter(),
     invitations: createTableAdapter('invitations'),
   },
 

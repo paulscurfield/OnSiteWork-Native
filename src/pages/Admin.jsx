@@ -107,6 +107,7 @@ export default function Admin() {
   const { company } = useCompany();
   const adminJobsRequestIdRef = useRef(0);
   const timeEntriesRequestIdRef = useRef(0);
+  const photosRequestIdRef = useRef(0);
   const [user, setUser] = useState(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [activeTab, setActiveTab] = useState('Jobs');
@@ -140,6 +141,9 @@ export default function Admin() {
   const [editSaving, setEditSaving] = useState(false);
   const [entryDeleteSavingId, setEntryDeleteSavingId] = useState(null);
   const [photos, setPhotos] = useState([]);
+  const [photosLoading, setPhotosLoading] = useState(false);
+  const [photosError, setPhotosError] = useState('');
+  const [photoDeleteSavingId, setPhotoDeleteSavingId] = useState(null);
   const [photoFilter, setPhotoFilter] = useState('');
   const [lightboxPhoto, setLightboxPhoto] = useState(null);
   const [preStarts, setPreStarts] = useState([]);
@@ -170,13 +174,76 @@ export default function Admin() {
         timeEntriesRequestIdRef.current += 1;
       };
     }
-    if (activeTab === 'Photos') loadPhotos();
+    if (activeTab === 'Photos') {
+      loadPhotos();
+      return () => {
+        photosRequestIdRef.current += 1;
+      };
+    }
     if (activeTab === 'Pre-Starts') loadPreStarts();
   }, [activeTab, weekStart, company]);
 
   const loadPhotos = async () => {
-    const all = await base44.entities.JobPhoto.filter({ company_id: company?.id }, '-created_date', 200);
-    setPhotos(all);
+    const requestId = photosRequestIdRef.current + 1;
+    photosRequestIdRef.current = requestId;
+    setPhotosLoading(true);
+    setPhotosError('');
+    setPhotos([]);
+    setLightboxPhoto(null);
+
+    try {
+      const resolvedCompany = await resolveAdminSupabaseCompany();
+      const rows = await onsiteApi.tables.jobPhotos.filter(
+        { company_id: resolvedCompany.id },
+        '-created_at',
+        200
+      );
+      const enriched = await Promise.all(rows.map(async (photo) => {
+        try {
+          const signedUrl = await onsiteApi.tables.jobPhotos.getSignedUrl({
+            companyId: resolvedCompany.id,
+            photoPath: photo.photo_path,
+            expiresIn: 3600,
+          });
+          return { ...photo, signed_url: signedUrl };
+        } catch (error) {
+          console.warn('Failed to sign Site Photo URL', error);
+          return { ...photo, signed_url: null };
+        }
+      }));
+      if (photosRequestIdRef.current !== requestId) return;
+      setPhotos(enriched);
+    } catch (error) {
+      console.error('Failed to load Site Photos', error);
+      if (photosRequestIdRef.current !== requestId) return;
+      setPhotosError('Site Photos are unavailable. Try again later.');
+      setPhotos([]);
+      setLightboxPhoto(null);
+    } finally {
+      if (photosRequestIdRef.current === requestId) {
+        setPhotosLoading(false);
+      }
+    }
+  };
+
+  const handleDeletePhoto = async (photo) => {
+    if (!photo?.id || photoDeleteSavingId) return;
+    setPhotoDeleteSavingId(photo.id);
+    try {
+      const result = await onsiteApi.tables.jobPhotos.deleteAdmin(photo.id);
+      setPhotos(current => current.filter(item => item.id !== photo.id));
+      setLightboxPhoto(current => (current?.id === photo.id ? null : current));
+      if (result.cleanup_warning) {
+        toast.warning(result.cleanup_warning);
+      } else {
+        toast.success('Photo deleted');
+      }
+    } catch (error) {
+      console.error('Failed to delete Site Photo', error);
+      toast.error('Failed to delete photo');
+    } finally {
+      setPhotoDeleteSavingId(current => (current === photo.id ? null : current));
+    }
   };
 
   const exportPreStartsCSV = () => {
@@ -1022,6 +1089,7 @@ OnSite Timesheet`;
             <select
               value={photoFilter}
               onChange={e => setPhotoFilter(e.target.value)}
+              disabled={photosLoading}
               className="flex-1 bg-card border border-border rounded-xl px-3 py-2 text-sm outline-none"
             >
               <option value="">All Workers</option>
@@ -1033,11 +1101,27 @@ OnSite Timesheet`;
             <p className="text-xs text-muted-foreground whitespace-nowrap">{photos.filter(p => !photoFilter || p.worker_email === photoFilter).length} photos</p>
           </div>
 
-          {photos.length === 0 ? (
+          {photosLoading ? (
+            <div className="text-center py-16">
+              <Loader2 className="w-10 h-10 text-primary mx-auto mb-3 animate-spin" />
+              <p className="text-muted-foreground text-sm">Loading site photos...</p>
+            </div>
+          ) : photosError ? (
+            <div className="text-center py-16">
+              <AlertTriangle className="w-12 h-12 text-destructive/60 mx-auto mb-3" />
+              <p className="text-muted-foreground text-sm">Site Photos unavailable</p>
+              <p className="text-muted-foreground/60 text-xs mt-1">{photosError}</p>
+            </div>
+          ) : photos.length === 0 ? (
             <div className="text-center py-16">
               <Camera className="w-12 h-12 text-muted-foreground/30 mx-auto mb-3" />
               <p className="text-muted-foreground text-sm">No site photos yet</p>
               <p className="text-muted-foreground/60 text-xs mt-1">Workers can upload photos from the Site Photos button on the home screen</p>
+            </div>
+          ) : photos.filter(p => !photoFilter || p.worker_email === photoFilter).length === 0 ? (
+            <div className="text-center py-16">
+              <Camera className="w-12 h-12 text-muted-foreground/30 mx-auto mb-3" />
+              <p className="text-muted-foreground text-sm">No photos for this worker.</p>
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-3">
@@ -1046,7 +1130,14 @@ OnSite Timesheet`;
                 .map(photo => (
                   <div key={photo.id} onClick={() => setLightboxPhoto(photo)}
                     className="bg-card border border-border rounded-2xl overflow-hidden cursor-pointer active:scale-95 transition-all">
-                    <img src={photo.photo_url} alt="site" className="w-full h-36 object-cover" />
+                    {photo.signed_url ? (
+                      <img src={photo.signed_url} alt="site" className="w-full h-36 object-cover" />
+                    ) : (
+                      <div className="w-full h-36 bg-muted/50 flex flex-col items-center justify-center gap-2">
+                        <AlertTriangle className="w-7 h-7 text-muted-foreground/50" />
+                        <p className="text-xs font-semibold text-muted-foreground">Preview unavailable</p>
+                      </div>
+                    )}
                     <div className="p-2">
                       <p className="text-xs font-semibold truncate">{photo.worker_name}</p>
                       <p className="text-xs text-muted-foreground truncate">{photo.job_name || 'No job'}</p>
@@ -1373,14 +1464,21 @@ OnSite Timesheet`;
           <button className="absolute top-6 right-6 w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center">
             <X className="w-5 h-5 text-white" />
           </button>
-          <img src={lightboxPhoto.photo_url} alt="site" className="max-w-full max-h-[70vh] rounded-2xl object-contain" onClick={e => e.stopPropagation()} />
+          {lightboxPhoto.signed_url ? (
+            <img src={lightboxPhoto.signed_url} alt="site" className="max-w-full max-h-[70vh] rounded-2xl object-contain" onClick={e => e.stopPropagation()} />
+          ) : (
+            <div className="w-full max-w-md h-72 rounded-2xl bg-white/10 border border-white/10 flex flex-col items-center justify-center gap-3" onClick={e => e.stopPropagation()}>
+              <AlertTriangle className="w-10 h-10 text-white/50" />
+              <p className="text-white/70 text-sm font-semibold">Photo preview unavailable</p>
+            </div>
+          )}
           <div className="mt-4 text-center" onClick={e => e.stopPropagation()}>
             <p className="text-white font-bold">{lightboxPhoto.worker_name}</p>
             <p className="text-white/60 text-sm">{lightboxPhoto.job_name} {lightboxPhoto.job_number ? `#${lightboxPhoto.job_number}` : ''} · {lightboxPhoto.date}</p>
             {lightboxPhoto.notes && <p className="text-white/50 text-sm mt-1 italic">"{lightboxPhoto.notes}"</p>}
-            <button onClick={async () => { await base44.entities.JobPhoto.delete(lightboxPhoto.id); setLightboxPhoto(null); loadPhotos(); toast.success('Photo deleted'); }}
-              className="mt-3 px-4 py-2 rounded-xl bg-destructive/80 text-white text-xs font-semibold flex items-center gap-1.5 mx-auto">
-              <Trash2 className="w-3.5 h-3.5" /> Delete Photo
+            <button onClick={() => handleDeletePhoto(lightboxPhoto)} disabled={photoDeleteSavingId === lightboxPhoto.id}
+              className="mt-3 px-4 py-2 rounded-xl bg-destructive/80 text-white text-xs font-semibold flex items-center gap-1.5 mx-auto disabled:opacity-60">
+              <Trash2 className="w-3.5 h-3.5" /> {photoDeleteSavingId === lightboxPhoto.id ? 'Deleting...' : 'Delete Photo'}
             </button>
           </div>
         </div>,

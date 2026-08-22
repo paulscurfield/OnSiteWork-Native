@@ -24,6 +24,13 @@ const LEAVE_REVIEW_STATUS_VALUES = new Set(['approved', 'declined']);
 const MESSAGE_TYPE_VALUES = new Set(['direct', 'broadcast']);
 const EQUIPMENT_CATEGORY_VALUES = new Set(['machinery', 'tools', 'vehicle', 'safety', 'electrical', 'other']);
 const EQUIPMENT_ADMIN_STATUS_VALUES = new Set(['available', 'maintenance']);
+const AVATARS_BUCKET = 'avatars';
+const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
+const AVATAR_EXTENSIONS = new Map([
+  ['image/jpeg', 'jpg'],
+  ['image/png', 'png'],
+  ['image/webp', 'webp'],
+]);
 const EQUIPMENT_PHOTO_BUCKET = 'equipment-photos';
 const EQUIPMENT_PHOTO_MAX_BYTES = 20 * 1024 * 1024;
 const EQUIPMENT_PHOTO_EXTENSIONS = new Map([
@@ -593,6 +600,136 @@ const secureRandomUuid = () => {
     throw new Error('Secure UUID generation is not available');
   }
   return randomUUID().toLowerCase();
+};
+
+const normalizeAvatarSignedUrlExpiry = (expiresIn = 3600) => {
+  const seconds = Number(expiresIn);
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 86400) {
+    throw new Error('expiresIn must be an integer between 1 and 86400 seconds');
+  }
+  return seconds;
+};
+
+const assertOnlyKeys = (values, allowedKeys, methodName) => {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) {
+    throw new Error(`${methodName} values are required`);
+  }
+  const unexpectedKeys = Object.keys(values).filter((key) => !allowedKeys.includes(key));
+  if (unexpectedKeys.length > 0) {
+    throw new Error(`${methodName} received unsupported field: ${unexpectedKeys[0]}`);
+  }
+};
+
+const validateAvatarFile = (file) => {
+  if (!file || typeof file !== 'object') {
+    throw new Error('avatar file is required');
+  }
+
+  const size = Number(file.size);
+  if (!Number.isFinite(size) || size <= 0) {
+    throw new Error('avatar file must not be empty');
+  }
+  if (size > AVATAR_MAX_BYTES) {
+    throw new Error('avatar file must be 5 MB or smaller');
+  }
+
+  const mimeType = typeof file.type === 'string' ? file.type.trim() : '';
+  const extension = AVATAR_EXTENSIONS.get(mimeType);
+  if (!extension) {
+    throw new Error('avatar file must be JPEG, PNG, or WebP');
+  }
+
+  return { mimeType, extension };
+};
+
+const parseAvatarPath = (avatarPath, expectedUserId) => {
+  const path = requiredText(avatarPath, 'avatar_path');
+  if (path !== avatarPath || path !== path.toLowerCase()) {
+    throw new Error('avatar_path must be a lowercase canonical avatar path');
+  }
+
+  const segments = path.split('/');
+  if (segments.length !== 3) {
+    throw new Error('avatar_path must use the canonical avatar path format');
+  }
+
+  const [userLiteral, userIdValue, filename] = segments;
+  if (userLiteral !== 'user') {
+    throw new Error('avatar_path must use the canonical avatar path format');
+  }
+  if (!filename || filename.includes('/')) {
+    throw new Error('avatar_path must include a single avatar filename');
+  }
+
+  const filenameParts = filename.split('.');
+  if (filenameParts.length !== 2) {
+    throw new Error('avatar_path filename must be a UUID with jpg, png, or webp extension');
+  }
+  const [avatarIdValue, extension] = filenameParts;
+  if (!['jpg', 'png', 'webp'].includes(extension)) {
+    throw new Error('avatar_path extension must be jpg, png, or webp');
+  }
+
+  const userId = normalizeLowercaseUuid(userIdValue, 'avatar_path user_id');
+  const avatarId = normalizeLowercaseUuid(avatarIdValue, 'avatar_path file UUID');
+  if (expectedUserId && userId !== expectedUserId) {
+    throw new Error('avatar_path must belong to the authenticated user');
+  }
+
+  const canonicalPath = `user/${userId}/${avatarId}.${extension}`;
+  if (path !== canonicalPath) {
+    throw new Error('avatar_path must be a lowercase canonical avatar path');
+  }
+
+  return {
+    path,
+    userId,
+    avatarId,
+    extension,
+  };
+};
+
+const isOwnAvatarPath = (avatarPath, userId) => {
+  try {
+    parseAvatarPath(avatarPath, userId);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const avatarPath = (userId, extension) => (
+  `user/${userId}/${secureRandomUuid()}.${extension}`
+);
+
+const mapProfileRpcResult = (result, expectedUserId) => {
+  const profile = result?.profile;
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
+    throw new Error('Profile RPC returned an invalid response');
+  }
+  if (expectedUserId && normalizeLowercaseUuid(profile.id, 'profile.id') !== expectedUserId) {
+    throw new Error('Profile RPC returned mismatched profile data');
+  }
+  return profile;
+};
+
+const uploadAvatarObject = async ({ path, file, mimeType }) => {
+  const { data, error } = await supabase.storage
+    .from(AVATARS_BUCKET)
+    .upload(path, file, { upsert: false, contentType: mimeType });
+  if (error) throw error;
+  if (!data || data.path !== path) {
+    throw new Error('avatar upload returned an invalid path');
+  }
+  return data;
+};
+
+const removeAvatarObject = async (path) => {
+  const { error } = await supabase.storage
+    .from(AVATARS_BUCKET)
+    .remove([path]);
+  if (error) throw error;
+  return true;
 };
 
 const validateSitePhotoFile = (file) => {
@@ -1644,19 +1781,89 @@ export const onsiteApi = {
       return data;
     },
 
-    async updateMe(values) {
-      const { data: userData, error: userError } = await supabase.auth.getUser();
-      if (userError) throw userError;
-      if (!userData.user) throw new Error('Not authenticated');
+    async updateMe() {
+      throw new Error('Direct profile updates are unsupported; use auth.updateMyProfile() or auth.replaceMyAvatar()');
+    },
 
-      const { data, error } = await supabase
-        .from('profiles')
-        .update(values)
-        .eq('id', userData.user.id)
-        .select()
-        .single();
+    async updateMyProfile(values = {}) {
+      assertOnlyKeys(values, ['full_name', 'phone'], 'auth.updateMyProfile');
+      if (!hasOwn(values, 'full_name') || !hasOwn(values, 'phone')) {
+        throw new Error('auth.updateMyProfile requires full_name and phone');
+      }
+
+      const { data, error } = await supabase.rpc('update_my_profile', {
+        p_full_name: values.full_name,
+        p_phone: values.phone,
+      });
       if (error) throw error;
-      return data;
+      return mapProfileRpcResult(data);
+    },
+
+    async replaceMyAvatar(file) {
+      const { mimeType, extension } = validateAvatarFile(file);
+      const userId = await getAuthenticatedUserId();
+
+      const { data: currentProfile, error: profileError } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .single();
+      if (profileError) throw profileError;
+
+      const previousAvatarPath = currentProfile?.avatar_path;
+      const nextAvatarPath = avatarPath(userId, extension);
+      let uploaded = false;
+      let attached = false;
+
+      try {
+        await uploadAvatarObject({ path: nextAvatarPath, file, mimeType });
+        uploaded = true;
+
+        const { data, error } = await supabase.rpc('set_my_avatar_path', {
+          p_avatar_path: nextAvatarPath,
+        });
+        if (error) throw error;
+        attached = true;
+
+        const profile = mapProfileRpcResult(data, userId);
+        if (
+          previousAvatarPath &&
+          previousAvatarPath !== nextAvatarPath &&
+          isOwnAvatarPath(previousAvatarPath, userId)
+        ) {
+          try {
+            await removeAvatarObject(previousAvatarPath);
+          } catch {
+            // The new avatar is already attached; stale-object cleanup is non-fatal.
+          }
+        }
+        return profile;
+      } catch (error) {
+        if (uploaded && !attached) {
+          try {
+            await removeAvatarObject(nextAvatarPath);
+          } catch {
+            // Best-effort cleanup must not hide the original attach failure.
+          }
+        }
+        throw error;
+      }
+    },
+
+    async getMyAvatarSignedUrl(avatarPathValue, expiresIn = 3600) {
+      const trimmedPath = optionalId(avatarPathValue);
+      if (!trimmedPath) return null;
+
+      const userId = await getAuthenticatedUserId();
+      const parsedPath = parseAvatarPath(trimmedPath, userId);
+      const { data, error } = await supabase.storage
+        .from(AVATARS_BUCKET)
+        .createSignedUrl(parsedPath.path, normalizeAvatarSignedUrlExpiry(expiresIn));
+      if (error) throw error;
+      if (!data?.signedUrl) {
+        throw new Error('avatar signed URL response was invalid');
+      }
+      return data.signedUrl;
     },
 
     async logout() {

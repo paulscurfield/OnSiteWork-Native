@@ -462,7 +462,9 @@ OnSite Timesheet`;
     } catch (error) {
       if (mountedRef.current && requestId === adminJobsRequestIdRef.current) {
         console.error('Failed to load Supabase admin jobs:', error);
-        setSupabaseCompany(null);
+        if (!knownCompany) {
+          setSupabaseCompany(null);
+        }
         setAdminJobs([]);
       }
       return null;

@@ -22,6 +22,7 @@ const JOB_STATUS_VALUES = new Set(['active', 'completed', 'on_hold']);
 const LEAVE_TYPE_VALUES = new Set(['annual', 'sick', 'personal', 'other']);
 const LEAVE_REVIEW_STATUS_VALUES = new Set(['approved', 'declined']);
 const MESSAGE_TYPE_VALUES = new Set(['direct', 'broadcast']);
+const ADMIN_MANAGED_MEMBER_ROLE_VALUES = new Set(['admin', 'supervisor', 'worker']);
 const EQUIPMENT_CATEGORY_VALUES = new Set(['machinery', 'tools', 'vehicle', 'safety', 'electrical', 'other']);
 const EQUIPMENT_ADMIN_STATUS_VALUES = new Set(['available', 'maintenance']);
 const AVATARS_BUCKET = 'avatars';
@@ -345,6 +346,102 @@ const mapRpcUnreadCountResult = (result) => {
     throw new Error('get_unread_message_count returned an invalid response');
   }
   return unreadCount;
+};
+
+const normalizeAdminManagedMemberRole = (value, fieldName = 'role') => {
+  const role = requiredText(value, fieldName);
+  if (!ADMIN_MANAGED_MEMBER_ROLE_VALUES.has(role)) {
+    throw new Error(`${fieldName} must be admin, supervisor, or worker`);
+  }
+  return role;
+};
+
+const normalizeInvitationEmail = (value) => {
+  const email = requiredText(value, 'email').toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error('email must be a valid email address');
+  }
+  return email;
+};
+
+const mapRpcMembershipResult = (result, rpcName, expected = {}) => {
+  const membership = result?.membership;
+  if (!membership || typeof membership !== 'object' || Array.isArray(membership)) {
+    throw new Error(`${rpcName} returned an invalid response`);
+  }
+  if (
+    expected.companyId &&
+    normalizeLowercaseUuid(membership.company_id, 'membership.company_id') !== expected.companyId
+  ) {
+    throw new Error(`${rpcName} returned a membership for the wrong company`);
+  }
+  if (
+    expected.userId &&
+    normalizeLowercaseUuid(membership.user_id, 'membership.user_id') !== expected.userId
+  ) {
+    throw new Error(`${rpcName} returned a membership for the wrong user`);
+  }
+  if (expected.role && membership.role !== expected.role) {
+    throw new Error(`${rpcName} returned a membership with the wrong role`);
+  }
+  return membership;
+};
+
+const mapRpcInvitationResult = (result, rpcName, expected = {}) => {
+  const invitation = result?.invitation;
+  if (!invitation || typeof invitation !== 'object' || Array.isArray(invitation)) {
+    throw new Error(`${rpcName} returned an invalid response`);
+  }
+  if (
+    expected.companyId &&
+    normalizeLowercaseUuid(invitation.company_id, 'invitation.company_id') !== expected.companyId
+  ) {
+    throw new Error(`${rpcName} returned an invitation for the wrong company`);
+  }
+  if (expected.email && String(invitation.email || '').toLowerCase() !== expected.email) {
+    throw new Error(`${rpcName} returned an invitation for the wrong email`);
+  }
+  if (expected.role && invitation.role !== expected.role) {
+    throw new Error(`${rpcName} returned an invitation with the wrong role`);
+  }
+  if (expected.status && invitation.status !== expected.status) {
+    throw new Error(`${rpcName} returned an invitation with the wrong status`);
+  }
+  return invitation;
+};
+
+const companyMemberChangeRoleAdminParams = (values = {}) => {
+  assertOnlyKeys(values, ['company_id', 'user_id', 'role'], 'companyMembers.changeRoleAdmin');
+  return {
+    p_company_id: normalizeLowercaseUuid(values.company_id, 'company_id'),
+    p_user_id: normalizeLowercaseUuid(values.user_id, 'user_id'),
+    p_role: normalizeAdminManagedMemberRole(values.role),
+  };
+};
+
+const companyMemberRemoveAdminParams = (values = {}) => {
+  assertOnlyKeys(values, ['company_id', 'user_id'], 'companyMembers.removeAdmin');
+  return {
+    p_company_id: normalizeLowercaseUuid(values.company_id, 'company_id'),
+    p_user_id: normalizeLowercaseUuid(values.user_id, 'user_id'),
+  };
+};
+
+const invitationCreatePendingAdminParams = (values = {}) => {
+  assertOnlyKeys(values, ['company_id', 'email', 'role'], 'invitations.createPendingAdmin');
+  return {
+    p_company_id: normalizeLowercaseUuid(values.company_id, 'company_id'),
+    p_email: normalizeInvitationEmail(values.email),
+    p_role: normalizeAdminManagedMemberRole(values.role),
+  };
+};
+
+const invitationRevokeAdminParams = (values = {}) => {
+  assertOnlyKeys(values, ['company_id', 'invitation_id'], 'invitations.revokeAdmin');
+  return {
+    p_company_id: normalizeLowercaseUuid(values.company_id, 'company_id'),
+    p_invitation_id: normalizeLowercaseUuid(values.invitation_id, 'invitation_id'),
+  };
 };
 
 const mapRpcEquipmentTransitionResult = (result) => {
@@ -1109,6 +1206,18 @@ const mapCompanyWorkerDirectoryEntry = (entry = {}) => {
 const createCompanyMembersAdapter = () => ({
   ...createTableAdapter('company_members'),
 
+  async create() {
+    throw new Error('Direct company member writes are unsupported; use dedicated admin methods');
+  },
+
+  async update() {
+    throw new Error('Direct company member writes are unsupported; use dedicated admin methods');
+  },
+
+  async delete() {
+    throw new Error('Direct company member writes are unsupported; use dedicated admin methods');
+  },
+
   async directory(companyId) {
     const normalizedCompanyId = optionalId(companyId);
     if (!normalizedCompanyId) throw new Error('companyId is required');
@@ -1119,6 +1228,27 @@ const createCompanyMembersAdapter = () => ({
     });
     if (error) throw error;
     return (data || []).map(mapCompanyWorkerDirectoryEntry);
+  },
+
+  async changeRoleAdmin(values) {
+    const params = companyMemberChangeRoleAdminParams(values);
+    const { data, error } = await supabase.rpc('change_company_member_role_admin', params);
+    if (error) throw error;
+    return mapRpcMembershipResult(data, 'change_company_member_role_admin', {
+      companyId: params.p_company_id,
+      userId: params.p_user_id,
+      role: params.p_role,
+    });
+  },
+
+  async removeAdmin(values) {
+    const params = companyMemberRemoveAdminParams(values);
+    const { data, error } = await supabase.rpc('remove_company_member_admin', params);
+    if (error) throw error;
+    return mapRpcMembershipResult(data, 'remove_company_member_admin', {
+      companyId: params.p_company_id,
+      userId: params.p_user_id,
+    });
   },
 });
 
@@ -1377,6 +1507,44 @@ const createMessageReadsAdapter = () => ({
 
   async delete() {
     throw new Error('Message read receipt deletion is unsupported');
+  },
+});
+
+const createInvitationsAdapter = () => ({
+  ...createTableAdapter('invitations'),
+
+  async create() {
+    throw new Error('Direct invitation writes are unsupported; use invitations.createPendingAdmin()');
+  },
+
+  async update() {
+    throw new Error('Direct invitation writes are unsupported; use invitations.revokeAdmin()');
+  },
+
+  async delete() {
+    throw new Error('Direct invitation writes are unsupported; use invitations.revokeAdmin()');
+  },
+
+  async createPendingAdmin(values) {
+    const params = invitationCreatePendingAdminParams(values);
+    const { data, error } = await supabase.rpc('create_company_invitation_admin', params);
+    if (error) throw error;
+    return mapRpcInvitationResult(data, 'create_company_invitation_admin', {
+      companyId: params.p_company_id,
+      email: params.p_email,
+      role: params.p_role,
+      status: 'pending',
+    });
+  },
+
+  async revokeAdmin(values) {
+    const params = invitationRevokeAdminParams(values);
+    const { data, error } = await supabase.rpc('revoke_company_invitation_admin', params);
+    if (error) throw error;
+    return mapRpcInvitationResult(data, 'revoke_company_invitation_admin', {
+      companyId: params.p_company_id,
+      status: 'revoked',
+    });
   },
 });
 
@@ -1885,7 +2053,7 @@ export const onsiteApi = {
     jobSchedules: createJobSchedulesAdapter(),
     messages: createMessagesAdapter(),
     messageReads: createMessageReadsAdapter(),
-    invitations: createTableAdapter('invitations'),
+    invitations: createInvitationsAdapter(),
   },
 
   teamMap: createTeamMapAdapter(),

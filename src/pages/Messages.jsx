@@ -1,41 +1,91 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { base44 } from '@/api/base44Client';
+import { onsiteApi } from '@/api/supabase/adapter';
 import { useCompany } from '@/lib/companyContext';
 import { Link } from 'react-router-dom';
 import { ChevronLeft, MessageSquare, Send, X, Plus, Mail, Users } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
+import { toast } from 'sonner';
+
+const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
+
+const workerDisplayName = (worker = {}) => worker.display_name || worker.full_name || worker.email || '';
 
 export default function Messages() {
   const { company } = useCompany();
+  const directoryRequestIdRef = useRef(0);
   const [user, setUser] = useState(null);
   const [messages, setMessages] = useState([]);
   const [users, setUsers] = useState([]);
+  const [directoryLoading, setDirectoryLoading] = useState(false);
+  const [directoryError, setDirectoryError] = useState('');
   const [showCompose, setShowCompose] = useState(false);
   const [activeTab, setActiveTab] = useState('inbox');
   const [form, setForm] = useState({ recipient_email: '', recipient_name: '', subject: '', body: '', message_type: 'direct' });
 
   useEffect(() => {
     base44.auth.me().then(setUser).catch(() => {});
-    // Try User list (works for admins), fall back to deriving unique workers from TimeEntry records
-    base44.entities.User.list()
-      .then(list => { if (list.length > 0) setUsers(list); })
-      .catch(() => {});
-    base44.entities.TimeEntry.list('-created_date', 500)
-      .then(entries => {
-        const map = {};
-        entries.forEach(e => {
-          if (e.worker_email && !map[e.worker_email]) {
-            map[e.worker_email] = { id: e.worker_email, email: e.worker_email, full_name: e.worker_name };
-          }
-        });
-        setUsers(prev => {
-          // If admin already loaded full user list, keep it; otherwise use derived list
-          if (prev.length > 0) return prev;
-          return Object.values(map);
-        });
-      })
-      .catch(() => {});
+    loadRecipientDirectory();
+
+    return () => {
+      directoryRequestIdRef.current += 1;
+    };
   }, []);
+
+  const loadRecipientDirectory = async () => {
+    const requestId = directoryRequestIdRef.current + 1;
+    directoryRequestIdRef.current = requestId;
+    setDirectoryLoading(true);
+    setDirectoryError('');
+
+    try {
+      await onsiteApi.auth.me();
+      const companies = await onsiteApi.tables.companies.list('name');
+      if (companies.length === 0) {
+        throw new Error('No Supabase company found for recipient directory');
+      }
+      if (companies.length > 1) {
+        throw new Error('Multiple Supabase companies found for recipient directory');
+      }
+
+      const directory = await onsiteApi.tables.companyMembers.directory(companies[0].id);
+      const recipients = directory
+        .filter(worker => normalizeEmail(worker.email))
+        .map(worker => ({
+          ...worker,
+          id: worker.user_id || worker.email,
+          email: worker.email,
+          display_name: workerDisplayName(worker),
+        }));
+
+      if (directoryRequestIdRef.current !== requestId) return;
+      setUsers(recipients);
+      setForm(current => {
+        if (
+          current.message_type !== 'direct' ||
+          !current.recipient_email ||
+          recipients.some(worker => normalizeEmail(worker.email) === normalizeEmail(current.recipient_email))
+        ) {
+          return current;
+        }
+        return { ...current, recipient_email: '', recipient_name: '' };
+      });
+    } catch (error) {
+      console.error('Failed to load message recipient directory', error);
+      if (directoryRequestIdRef.current !== requestId) return;
+      setUsers([]);
+      setDirectoryError('Recipients unavailable');
+      setForm(current => (
+        current.message_type === 'direct'
+          ? { ...current, recipient_email: '', recipient_name: '' }
+          : current
+      ));
+    } finally {
+      if (directoryRequestIdRef.current === requestId) {
+        setDirectoryLoading(false);
+      }
+    }
+  };
 
   const loadMessages = async () => {
     const all = await base44.entities.Message.filter({ company_id: company?.id }, '-created_date');
@@ -57,17 +107,29 @@ export default function Messages() {
 
   const inbox = messages.filter(m => m.recipient_email === user?.email || m.recipient_email === 'all');
   const sent = messages.filter(m => m.sender_email === user?.email);
+  const selectedRecipient = users.find(u => normalizeEmail(u.email) === normalizeEmail(form.recipient_email));
+  const hasValidDirectRecipient = Boolean(
+    selectedRecipient &&
+    normalizeEmail(selectedRecipient.email) &&
+    normalizeEmail(selectedRecipient.email) !== normalizeEmail(user?.email)
+  );
+  const hasMessageBody = Boolean(form.body.trim());
+  const canSend = hasMessageBody && (form.message_type === 'broadcast' || hasValidDirectRecipient);
 
   const handleSend = async () => {
-    if (!form.body) return;
+    if (!hasMessageBody) return;
+    if (form.message_type === 'direct' && !hasValidDirectRecipient) {
+      toast.error('Select a recipient');
+      return;
+    }
     await base44.entities.Message.create({
       company_id: company?.id,
       sender_email: user.email,
       sender_name: user.full_name,
       recipient_email: form.message_type === 'broadcast' ? 'all' : form.recipient_email,
-      recipient_name: form.message_type === 'broadcast' ? 'All Workers' : form.recipient_name,
+      recipient_name: form.message_type === 'broadcast' ? 'All Workers' : workerDisplayName(selectedRecipient),
       subject: form.subject,
-      body: form.body,
+      body: form.body.trim(),
       message_type: form.message_type,
     });
     setShowCompose(false);
@@ -175,15 +237,26 @@ export default function Messages() {
             <div className="space-y-3">
               {form.message_type === 'direct' && (
                 <select value={form.recipient_email}
+                  disabled={directoryLoading || Boolean(directoryError) || users.filter(u => normalizeEmail(u.email) !== normalizeEmail(user?.email)).length === 0}
                   onChange={e => {
-                    const u = users.find(u => u.email === e.target.value);
-                    setForm(f => ({ ...f, recipient_email: e.target.value, recipient_name: u?.full_name || '' }));
+                    const u = users.find(u => normalizeEmail(u.email) === normalizeEmail(e.target.value));
+                    setForm(f => ({ ...f, recipient_email: e.target.value, recipient_name: workerDisplayName(u) }));
                   }}
                   className="w-full bg-muted border border-border rounded-xl px-4 py-3 text-foreground outline-none">
-                  <option value="">Select recipient...</option>
-                  {users.filter(u => u.email !== user?.email).map(u => (
-                    <option key={u.id} value={u.email} className="bg-card">{u.full_name} ({u.email})</option>
-                  ))}
+                  {directoryLoading ? (
+                    <option value="">Loading recipients...</option>
+                  ) : directoryError ? (
+                    <option value="">Recipients unavailable</option>
+                  ) : users.filter(u => normalizeEmail(u.email) !== normalizeEmail(user?.email)).length === 0 ? (
+                    <option value="">No other workers available</option>
+                  ) : (
+                    <>
+                      <option value="">Select recipient...</option>
+                      {users.filter(u => normalizeEmail(u.email) !== normalizeEmail(user?.email)).map(u => (
+                        <option key={u.id} value={u.email} className="bg-card">{workerDisplayName(u)} ({u.email})</option>
+                      ))}
+                    </>
+                  )}
                 </select>
               )}
               <input value={form.subject} onChange={e => setForm(f => ({ ...f, subject: e.target.value }))}
@@ -195,7 +268,8 @@ export default function Messages() {
                 className="w-full bg-muted border border-border rounded-xl px-4 py-3 text-foreground outline-none placeholder:text-muted-foreground/50 resize-none" />
             </div>
 
-            <button onClick={handleSend} className="w-full mt-4 py-4 rounded-2xl bg-primary text-primary-foreground font-bold flex items-center justify-center gap-2">
+            <button onClick={handleSend} disabled={!canSend}
+              className="w-full mt-4 py-4 rounded-2xl bg-primary text-primary-foreground font-bold flex items-center justify-center gap-2 disabled:opacity-60">
               <Send className="w-5 h-5" />
               Send Message
             </button>

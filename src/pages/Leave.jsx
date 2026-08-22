@@ -1,7 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { base44 } from '@/api/base44Client';
-import { useCompany } from '@/lib/companyContext';
+import { onsiteApi } from '@/api/supabase/adapter';
 import { Link } from 'react-router-dom';
 import { ChevronLeft, CalendarOff, Plus, X, Check, Clock, CheckCircle, XCircle } from 'lucide-react';
 import { format, parseISO, differenceInCalendarDays } from 'date-fns';
@@ -20,57 +19,169 @@ const statusConfig = {
   declined: { label: 'Declined', icon: XCircle,      color: 'text-rose-400',   bg: 'bg-rose-500/15'   },
 };
 
+const emptyForm = { leave_type: 'annual', start_date: '', end_date: '', notes: '' };
+
+const resolveSupabaseCompany = (profile, companyRows) => {
+  if (!profile?.id) {
+    throw new Error('Not authenticated with Supabase');
+  }
+  if (companyRows.length === 0) {
+    throw new Error('No Supabase company found for Leave requests');
+  }
+  if (companyRows.length > 1) {
+    throw new Error('Multiple Supabase companies found. A company selector is required before Leave can load safely.');
+  }
+  return companyRows[0];
+};
+
+const requireMembership = (rows = []) => {
+  if (rows.length !== 1) {
+    throw new Error('Current user is not a member of the resolved Supabase company');
+  }
+  return rows[0];
+};
+
+const isAdminMembership = (membership) => membership?.role === 'owner' || membership?.role === 'admin';
+
 export default function Leave() {
-  const { company } = useCompany();
-  const [user, setUser]         = useState(null);
+  const requestIdRef = useRef(0);
+  const mountedRef = useRef(false);
+  const [profile, setProfile] = useState(null);
+  const [supabaseCompany, setSupabaseCompany] = useState(null);
+  const [membership, setMembership] = useState(null);
   const [requests, setRequests] = useState([]);
   const [loading, setLoading]   = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [showModal, setShowModal] = useState(false);
-  const [form, setForm] = useState({ leave_type: 'annual', start_date: '', end_date: '', notes: '' });
+  const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
-  const isAdmin = user?.role === 'admin' || (company && company.owner_email === user?.email);
+  const isAdmin = isAdminMembership(membership);
 
   useEffect(() => {
-    base44.auth.me().then(u => {
-      setUser(u);
-      loadRequests(u);
-    }).catch(() => setLoading(false));
+    mountedRef.current = true;
+    loadLeaveContext();
+    return () => {
+      mountedRef.current = false;
+      requestIdRef.current += 1;
+    };
   }, []);
 
-  const loadRequests = async (u) => {
-    const all = await base44.entities.LeaveRequest.filter({ company_id: company?.id }, '-created_date');
-    // Admins see all, workers see only their own
-    setRequests(u?.role === 'admin' ? all : all.filter(r => r.worker_email === u?.email));
-    setLoading(false);
+  const loadLeaveContext = async () => {
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    setLoading(true);
+    setLoadError('');
+    setProfile(null);
+    setSupabaseCompany(null);
+    setMembership(null);
+    setRequests([]);
+
+    try {
+      const [currentProfile, companyRows] = await Promise.all([
+        onsiteApi.auth.me(),
+        onsiteApi.tables.companies.list('name'),
+      ]);
+      const resolvedCompany = resolveSupabaseCompany(currentProfile, companyRows);
+      const membershipRows = await onsiteApi.tables.companyMembers.filter({
+        company_id: resolvedCompany.id,
+        user_id: currentProfile.id,
+      });
+      const resolvedMembership = requireMembership(membershipRows);
+      const leaveRows = await onsiteApi.tables.leaveRequests.filter(
+        { company_id: resolvedCompany.id },
+        '-created_at'
+      );
+
+      if (!mountedRef.current || requestIdRef.current !== requestId) return;
+      setProfile(currentProfile);
+      setSupabaseCompany(resolvedCompany);
+      setMembership(resolvedMembership);
+      setRequests(leaveRows);
+    } catch (error) {
+      console.error('Failed to load Supabase Leave requests:', error);
+      if (!mountedRef.current || requestIdRef.current !== requestId) return;
+      setLoadError('Leave requests are unavailable. Try again later.');
+      setProfile(null);
+      setSupabaseCompany(null);
+      setMembership(null);
+      setRequests([]);
+    } finally {
+      if (mountedRef.current && requestIdRef.current === requestId) {
+        setLoading(false);
+      }
+    }
+  };
+
+  const refreshRequests = async () => {
+    if (!supabaseCompany?.id) return;
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+
+    try {
+      const leaveRows = await onsiteApi.tables.leaveRequests.filter(
+        { company_id: supabaseCompany.id },
+        '-created_at'
+      );
+      if (!mountedRef.current || requestIdRef.current !== requestId) return;
+      setLoadError('');
+      setRequests(leaveRows);
+    } catch (error) {
+      console.error('Failed to refresh Supabase Leave requests:', error);
+      if (!mountedRef.current || requestIdRef.current !== requestId) return;
+      setLoadError('Leave requests are unavailable. Try again later.');
+    }
   };
 
   const handleSubmit = async () => {
     if (!form.start_date || !form.end_date) { toast.error('Please fill in dates'); return; }
+    if (form.end_date < form.start_date) { toast.error('End date cannot be before start date'); return; }
+    if (!supabaseCompany?.id || !profile?.id) { toast.error('Leave requests are not ready yet'); return; }
+
     setSaving(true);
-    await base44.entities.LeaveRequest.create({
-      ...form,
-      company_id: company?.id,
-      worker_email: user.email,
-      worker_name: user.full_name,
-      status: 'pending',
-    });
-    toast.success('Leave request submitted!');
-    setShowModal(false);
-    setForm({ leave_type: 'annual', start_date: '', end_date: '', notes: '' });
-    setSaving(false);
-    loadRequests(user);
+    try {
+      await onsiteApi.tables.leaveRequests.createWorker({
+        company_id: supabaseCompany.id,
+        leave_type: form.leave_type,
+        start_date: form.start_date,
+        end_date: form.end_date,
+        notes: form.notes,
+      });
+      toast.success('Leave request submitted!');
+      setShowModal(false);
+      setForm(emptyForm);
+      await refreshRequests();
+    } catch (error) {
+      console.error('Failed to submit Supabase Leave request:', error);
+      toast.error('Failed to submit leave request');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleStatus = async (id, status) => {
-    await base44.entities.LeaveRequest.update(id, { status });
-    toast.success(`Request ${status}`);
-    loadRequests(user);
+    if (!isAdmin || !['approved', 'declined'].includes(status) || !supabaseCompany?.id) return;
+    try {
+      await onsiteApi.tables.leaveRequests.reviewAdmin(id, {
+        company_id: supabaseCompany.id,
+        status,
+      });
+      toast.success(`Request ${status}`);
+      await refreshRequests();
+    } catch (error) {
+      console.error('Failed to review Supabase Leave request:', error);
+      toast.error('Failed to update request');
+    }
   };
 
   const handleDelete = async (id) => {
-    await base44.entities.LeaveRequest.delete(id);
-    toast.success('Request deleted');
-    loadRequests(user);
+    try {
+      await onsiteApi.tables.leaveRequests.delete(id);
+      toast.success('Request deleted');
+      await refreshRequests();
+    } catch (error) {
+      console.error('Failed to delete Supabase Leave request:', error);
+      toast.error('Failed to delete request');
+    }
   };
 
   return (
@@ -80,7 +191,7 @@ export default function Leave() {
           <ChevronLeft className="w-5 h-5" />
         </Link>
         <h1 className="text-2xl font-black flex-1">Leave Requests</h1>
-        <button onClick={() => setShowModal(true)}
+        <button onClick={() => setShowModal(true)} disabled={loading || Boolean(loadError) || !supabaseCompany}
           className="w-9 h-9 rounded-xl bg-primary flex items-center justify-center">
           <Plus className="w-5 h-5 text-primary-foreground" />
         </button>
@@ -90,6 +201,11 @@ export default function Leave() {
       <div className="px-6 space-y-3">
         {loading ? (
           Array(3).fill(0).map((_, i) => <div key={i} className="h-20 rounded-2xl bg-card border border-border animate-pulse" />)
+        ) : loadError ? (
+          <div className="text-center py-16">
+            <CalendarOff className="w-12 h-12 text-muted-foreground/30 mx-auto mb-3" />
+            <p className="text-muted-foreground">{loadError}</p>
+          </div>
         ) : requests.length === 0 ? (
           <div className="text-center py-16">
             <CalendarOff className="w-12 h-12 text-muted-foreground/30 mx-auto mb-3" />

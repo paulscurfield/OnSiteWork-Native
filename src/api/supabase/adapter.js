@@ -28,6 +28,14 @@ const EQUIPMENT_PHOTO_EXTENSIONS = new Map([
   ['image/png', 'png'],
   ['image/webp', 'webp'],
 ]);
+const JOB_PHOTOS_BUCKET = 'job-photos';
+const SITE_PHOTO_MAX_BYTES = 20 * 1024 * 1024;
+const SITE_PHOTO_EXTENSIONS = new Map([
+  ['image/jpeg', 'jpg'],
+  ['image/png', 'png'],
+  ['image/webp', 'webp'],
+]);
+const SITE_PHOTO_CLEANUP_WARNING = 'Site Photo record was deleted, but the storage object may remain.';
 
 const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 
@@ -460,6 +468,152 @@ const equipmentPhotoPath = (companyId, equipmentId, extension) => (
   `${equipmentPhotoPathPrefix(companyId, equipmentId)}${randomEquipmentPhotoFilename(extension)}`
 );
 
+const normalizeLowercaseUuid = (value, fieldName) => requiredUuid(value, fieldName).toLowerCase();
+
+const secureRandomUuid = () => {
+  const randomUUID = globalThis.crypto?.randomUUID?.bind(globalThis.crypto);
+  if (typeof randomUUID !== 'function') {
+    throw new Error('Secure UUID generation is not available');
+  }
+  return randomUUID().toLowerCase();
+};
+
+const validateSitePhotoFile = (file) => {
+  if (!file || typeof file !== 'object') {
+    throw new Error('Site Photo file is required');
+  }
+
+  const size = Number(file.size);
+  if (!Number.isFinite(size) || size <= 0) {
+    throw new Error('Site Photo file must not be empty');
+  }
+  if (size > SITE_PHOTO_MAX_BYTES) {
+    throw new Error('Site Photo file must be 20 MB or smaller');
+  }
+
+  const mimeType = typeof file.type === 'string' ? file.type.trim() : '';
+  const extension = SITE_PHOTO_EXTENSIONS.get(mimeType);
+  if (!extension) {
+    throw new Error('Site Photo file must be JPEG, PNG, or WebP');
+  }
+
+  return { mimeType, extension };
+};
+
+const parseSitePhotoPath = (photoPath) => {
+  const path = requiredText(photoPath, 'photo_path');
+  if (path !== photoPath || path !== path.toLowerCase()) {
+    throw new Error('photo_path must be a lowercase canonical Site Photo path');
+  }
+
+  const segments = path.split('/');
+  if (segments.length !== 7) {
+    throw new Error('photo_path must use the canonical Site Photo path format');
+  }
+
+  const [companyLiteral, companyIdValue, jobsLiteral, jobIdValue, workersLiteral, workerIdValue, filename] = segments;
+  if (companyLiteral !== 'company' || jobsLiteral !== 'jobs' || workersLiteral !== 'workers') {
+    throw new Error('photo_path must use the canonical Site Photo path format');
+  }
+  if (!filename || filename.includes('/')) {
+    throw new Error('photo_path must include a single Site Photo filename');
+  }
+
+  const filenameParts = filename.split('.');
+  if (filenameParts.length !== 2) {
+    throw new Error('photo_path filename must be a UUID with jpg, png, or webp extension');
+  }
+  const [photoIdValue, extension] = filenameParts;
+  if (!['jpg', 'png', 'webp'].includes(extension)) {
+    throw new Error('photo_path extension must be jpg, png, or webp');
+  }
+
+  const companyId = normalizeLowercaseUuid(companyIdValue, 'photo_path company_id');
+  const jobId = normalizeLowercaseUuid(jobIdValue, 'photo_path job_id');
+  const workerId = normalizeLowercaseUuid(workerIdValue, 'photo_path worker_id');
+  const photoId = normalizeLowercaseUuid(photoIdValue, 'photo_path file UUID');
+  const canonicalPath = `company/${companyId}/jobs/${jobId}/workers/${workerId}/${photoId}.${extension}`;
+  if (path !== canonicalPath) {
+    throw new Error('photo_path must be a lowercase canonical Site Photo path');
+  }
+
+  return {
+    path,
+    companyId,
+    jobId,
+    workerId,
+    photoId,
+    extension,
+  };
+};
+
+const sitePhotoPath = ({ companyId, jobId, workerId, extension }) => (
+  `company/${companyId}/jobs/${jobId}/workers/${workerId}/${secureRandomUuid()}.${extension}`
+);
+
+const getAuthenticatedUserId = async () => {
+  const { data, error } = await supabase.auth.getUser();
+  if (error) throw error;
+  const userId = data?.user?.id;
+  if (!userId) throw new Error('Not authenticated');
+  return normalizeLowercaseUuid(userId, 'authenticated user id');
+};
+
+const mapCreateJobPhotoResult = (result, { companyId, jobId, workerId, photoPath, date }) => {
+  const jobPhoto = result?.job_photo;
+  if (!jobPhoto || typeof jobPhoto !== 'object' || Array.isArray(jobPhoto)) {
+    throw new Error('create_job_photo returned an invalid response');
+  }
+
+  const returnedCompanyId = normalizeLowercaseUuid(jobPhoto.company_id, 'job_photo.company_id');
+  const returnedJobId = normalizeLowercaseUuid(jobPhoto.job_id, 'job_photo.job_id');
+  const returnedWorkerId = normalizeLowercaseUuid(jobPhoto.worker_id, 'job_photo.worker_id');
+  if (
+    returnedCompanyId !== companyId ||
+    returnedJobId !== jobId ||
+    returnedWorkerId !== workerId ||
+    jobPhoto.photo_path !== photoPath ||
+    jobPhoto.date !== date
+  ) {
+    throw new Error('create_job_photo returned mismatched Site Photo data');
+  }
+
+  return jobPhoto;
+};
+
+const mapDeleteJobPhotoResult = (result, requestedId) => {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    throw new Error('delete_job_photo_admin returned an invalid response');
+  }
+
+  const id = normalizeLowercaseUuid(result.id, 'job_photo.id');
+  const companyId = normalizeLowercaseUuid(result.company_id, 'job_photo.company_id');
+  const jobId = optionalUuid(result.job_id, 'job_photo.job_id')?.toLowerCase() ?? null;
+  const parsedPath = parseSitePhotoPath(result.photo_path);
+  if (result.deleted !== true || id !== requestedId || parsedPath.companyId !== companyId) {
+    throw new Error('delete_job_photo_admin returned mismatched Site Photo data');
+  }
+
+  return {
+    deleted: true,
+    id,
+    company_id: companyId,
+    job_id: jobId,
+    photo_path: parsedPath.path,
+  };
+};
+
+const uploadSitePhotoObject = async ({ photoPath, file, mimeType }) => {
+  const { data, error } = await supabase.storage
+    .from(JOB_PHOTOS_BUCKET)
+    .upload(photoPath, file, { upsert: false, contentType: mimeType });
+  if (error) throw error;
+  if (!data || data.path !== photoPath) {
+    throw new Error('Site Photo upload returned an invalid path');
+  }
+  return data;
+};
+
 const removeEquipmentPhotoObject = async ({ companyId, equipmentId, photoPath }) => {
   const ids = normalizeEquipmentPhotoIds({ companyId, equipmentId });
   const path = requiredEquipmentPhotoPath(photoPath, ids.companyId, ids.equipmentId);
@@ -852,6 +1006,108 @@ const createPreStartsAdapter = () => ({
   },
 });
 
+const createJobPhotosAdapter = () => ({
+  async list() {
+    throw new Error('Use jobPhotos.filter({ company_id }) so Site Photos remain company-scoped');
+  },
+
+  async filter(filters = {}, orderBy = '-created_at', limit) {
+    const companyId = normalizeLowercaseUuid(filters.company_id, 'company_id');
+
+    let query = supabase.from('job_photos').select('*');
+    query = applyFilters(query, { ...filters, company_id: companyId });
+    query = orderQuery(query, orderBy);
+    if (limit) query = query.limit(limit);
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
+  },
+
+  async create() {
+    throw new Error('Use jobPhotos.createWorker() so Site Photo writes use the secure RPC');
+  },
+
+  async update() {
+    throw new Error('Site Photo updates are not supported');
+  },
+
+  async delete() {
+    throw new Error('Use jobPhotos.deleteAdmin() so Site Photo deletes use the secure RPC');
+  },
+
+  async createWorker(values = {}) {
+    const companyId = normalizeLowercaseUuid(values.company_id, 'company_id');
+    const jobId = normalizeLowercaseUuid(values.job_id, 'job_id');
+    const workerId = await getAuthenticatedUserId();
+    const date = toDateOnly(values.date, 'date');
+    const notes = optionalText(values.notes) ?? null;
+    const { mimeType, extension } = validateSitePhotoFile(values.file);
+    const photoPath = sitePhotoPath({ companyId, jobId, workerId, extension });
+
+    await uploadSitePhotoObject({
+      photoPath,
+      file: values.file,
+      mimeType,
+    });
+
+    const { data, error } = await supabase.rpc('create_job_photo', {
+      p_company_id: companyId,
+      p_job_id: jobId,
+      p_photo_path: photoPath,
+      p_date: date,
+      p_notes: notes,
+    });
+    if (error) throw error;
+
+    return mapCreateJobPhotoResult(data, {
+      companyId,
+      jobId,
+      workerId,
+      photoPath,
+      date,
+    });
+  },
+
+  async getSignedUrl(values = {}) {
+    const companyId = normalizeLowercaseUuid(values.companyId, 'companyId');
+    const parsedPath = parseSitePhotoPath(values.photoPath);
+    if (parsedPath.companyId !== companyId) {
+      throw new Error('photoPath must belong to companyId');
+    }
+
+    const { data, error } = await supabase.storage
+      .from(JOB_PHOTOS_BUCKET)
+      .createSignedUrl(parsedPath.path, normalizeSignedUrlExpiry(values.expiresIn));
+    if (error) throw error;
+    if (!data?.signedUrl) {
+      throw new Error('Site Photo signed URL response was invalid');
+    }
+    return data.signedUrl;
+  },
+
+  async deleteAdmin(id) {
+    const jobPhotoId = normalizeLowercaseUuid(id, 'job_photo_id');
+    const { data, error } = await supabase.rpc('delete_job_photo_admin', {
+      p_job_photo_id: jobPhotoId,
+    });
+    if (error) throw error;
+
+    const result = mapDeleteJobPhotoResult(data, jobPhotoId);
+    let cleanupWarning = null;
+    const { error: cleanupError } = await supabase.storage
+      .from(JOB_PHOTOS_BUCKET)
+      .remove([result.photo_path]);
+    if (cleanupError) {
+      cleanupWarning = SITE_PHOTO_CLEANUP_WARNING;
+    }
+
+    return {
+      ...result,
+      cleanup_warning: cleanupWarning,
+    };
+  },
+});
+
 const createEquipmentAdapter = () => ({
   async list(orderBy, limit) {
     let query = supabase.from('equipment').select('*');
@@ -1180,7 +1436,7 @@ export const onsiteApi = {
     equipment: createEquipmentAdapter(),
     equipmentLogs: createEquipmentLogsAdapter(),
     preStarts: createPreStartsAdapter(),
-    jobPhotos: createTableAdapter('job_photos'),
+    jobPhotos: createJobPhotosAdapter(),
     leaveRequests: createTableAdapter('leave_requests'),
     jobSchedules: createJobSchedulesAdapter(),
     messages: createTableAdapter('messages'),

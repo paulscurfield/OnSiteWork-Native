@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { base44 } from '@/api/base44Client';
 import { onsiteApi } from '@/api/supabase/adapter';
 import { useCompany } from '@/lib/companyContext';
 import {
@@ -53,35 +52,49 @@ export default function Dashboard() {
   const location = useLocation();
   const navigate = useNavigate();
   const requestIdRef = useRef(0);
-  const [user, setUser] = useState(null);
+  const unreadRequestIdRef = useRef(0);
   const [activeEntry, setActiveEntry] = useState(null);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [unreadCount, setUnreadCount] = useState(0);
   const [clockingOut, setClockingOut] = useState(false);
 
   useEffect(() => {
-    base44.auth.me().then(u => {
-      setUser(u);
-      loadUnread(u);
-    }).catch(() => {});
+    loadUnread();
     loadActiveEntry();
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => {
       requestIdRef.current += 1;
+      unreadRequestIdRef.current += 1;
       clearInterval(timer);
     };
   }, [company]);
 
   useEffect(() => {
-    if (user) loadUnread(user);
+    loadUnread();
   }, [location]);
 
-  const loadUnread = async (u) => {
-    if (!company) return;
-    base44.entities.Message.filter({ company_id: company.id }, '-created_date').then(msgs => {
-      const unread = msgs.filter(m => (m.recipient_email === u.email || m.recipient_email === 'all') && !m.is_read);
-      setUnreadCount(unread.length);
-    }).catch(() => {});
+  const loadUnread = async () => {
+    const requestId = unreadRequestIdRef.current + 1;
+    unreadRequestIdRef.current = requestId;
+
+    try {
+      const [profile, companyRows] = await Promise.all([
+        onsiteApi.auth.me(),
+        onsiteApi.tables.companies.list('name'),
+      ]);
+      if (requestId !== unreadRequestIdRef.current) return;
+
+      const resolvedCompany = resolveSupabaseCompany(profile, companyRows);
+      const count = await onsiteApi.tables.messages.unreadCount(resolvedCompany.id);
+      if (requestId !== unreadRequestIdRef.current) return;
+
+      setUnreadCount(count);
+    } catch (error) {
+      if (requestId === unreadRequestIdRef.current) {
+        console.error('Failed to load Supabase unread Message count:', error);
+        setUnreadCount(0);
+      }
+    }
   };
 
   const loadActiveEntry = async () => {

@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { base44 } from '@/api/base44Client';
 import { onsiteApi } from '@/api/supabase/adapter';
-import { useCompany } from '@/lib/companyContext';
 import { Link } from 'react-router-dom';
 import { ChevronLeft, Plus, Pencil, Trash2, Download, Users, Clock, X, Check, MapPin, FileText, UserPlus, Mail, Loader2, Camera, AlertTriangle } from 'lucide-react';
 import { format, parseISO, startOfWeek, addDays } from 'date-fns';
@@ -84,6 +83,8 @@ const mapDirectoryWorker = (worker = {}) => ({
   role: worker.role,
 });
 
+const isAdminRole = (role) => role === 'owner' || role === 'admin';
+
 /**
  * @typedef {{
  *   job_id: string,
@@ -95,22 +96,17 @@ const mapDirectoryWorker = (worker = {}) => ({
  * }} AdminEditEntryForm
  */
 
-/**
- * @typedef {{
- *   users: {
- *     inviteUser(user_email: string, role: string): Promise<unknown>
- *   }
- * }} Base44UsersCompatibility
- */
-
 export default function Admin() {
-  const { company } = useCompany();
+  const adminAuthRequestIdRef = useRef(0);
+  const mountedRef = useRef(false);
   const adminJobsRequestIdRef = useRef(0);
   const timeEntriesRequestIdRef = useRef(0);
   const photosRequestIdRef = useRef(0);
   const preStartsRequestIdRef = useRef(0);
   const [user, setUser] = useState(null);
+  const [adminMembership, setAdminMembership] = useState(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
+  const [adminAuthError, setAdminAuthError] = useState('');
   const [activeTab, setActiveTab] = useState('Jobs');
   const [supabaseCompany, setSupabaseCompany] = useState(null);
   const [adminJobs, setAdminJobs] = useState([]);
@@ -123,10 +119,6 @@ export default function Admin() {
   const [deleteSavingId, setDeleteSavingId] = useState(null);
   const [weekStart, setWeekStart] = useState(startOfWeek(new Date(), { weekStartsOn: 4 }));
   const [jobForm, setJobForm] = useState({ job_name: '', job_number: '', location_address: '', latitude: '', longitude: '', notes: '', status: 'active' });
-  const [showInviteModal, setShowInviteModal] = useState(false);
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole] = useState('user');
-  const [inviting, setInviting] = useState(false);
   const [myobExporting, setMyobExporting] = useState(false);
   const [myobProgress, setMyobProgress] = useState(0);
   const [showEmailModal, setShowEmailModal] = useState(false);
@@ -162,12 +154,63 @@ export default function Admin() {
   const [addDaySaving, setAddDaySaving] = useState(false);
   const [showWorkerPicker, setShowWorkerPicker] = useState(false);
 
-  useEffect(() => {
-    base44.auth.me().then(u => {
-      setUser(u);
+  const loadAdminContext = async () => {
+    const requestId = adminAuthRequestIdRef.current + 1;
+    adminAuthRequestIdRef.current = requestId;
+    setCheckingAuth(true);
+    setAdminAuthError('');
+    setUser(null);
+    setAdminMembership(null);
+    setSupabaseCompany(null);
+    setUsers([]);
+    setTimeEntryWorkers([]);
+
+    try {
+      const [profile, companyRows] = await Promise.all([
+        onsiteApi.auth.me(),
+        onsiteApi.tables.companies.list('name'),
+      ]);
+      const resolvedCompany = resolveSupabaseCompany(profile, companyRows);
+      const memberRows = await onsiteApi.tables.companyMembers.filter({
+        company_id: resolvedCompany.id,
+        user_id: profile.id,
+      });
+      if (memberRows.length !== 1) {
+        throw new Error('Admin membership could not be verified');
+      }
+
+      const membership = memberRows[0];
+      if (!isAdminRole(membership.role)) {
+        throw new Error('Admin membership is required');
+      }
+
+      if (!mountedRef.current || requestId !== adminAuthRequestIdRef.current) return;
+
+      setUser(profile);
+      setAdminMembership(membership);
+      setSupabaseCompany(resolvedCompany);
       setCheckingAuth(false);
-      loadAll();
-    }).catch(() => setCheckingAuth(false));
+      loadAll(resolvedCompany);
+    } catch (error) {
+      if (!mountedRef.current || requestId !== adminAuthRequestIdRef.current) return;
+      console.error('Failed to verify Supabase Admin access:', error);
+      setUser(null);
+      setAdminMembership(null);
+      setSupabaseCompany(null);
+      setUsers([]);
+      setTimeEntryWorkers([]);
+      setAdminAuthError('Access denied');
+      setCheckingAuth(false);
+    }
+  };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    loadAdminContext();
+    return () => {
+      mountedRef.current = false;
+      adminAuthRequestIdRef.current += 1;
+    };
   }, []);
 
   useEffect(() => {
@@ -189,7 +232,7 @@ export default function Admin() {
         preStartsRequestIdRef.current += 1;
       };
     }
-  }, [activeTab, weekStart, company]);
+  }, [activeTab, weekStart]);
 
   const loadPhotos = async () => {
     const requestId = photosRequestIdRef.current + 1;
@@ -401,67 +444,60 @@ OnSite Timesheet`;
     return resolveSupabaseCompany(profile, companyRows);
   };
 
-  const loadAdminJobs = async () => {
+  const loadAdminJobs = async (knownCompany) => {
     const requestId = adminJobsRequestIdRef.current + 1;
     adminJobsRequestIdRef.current = requestId;
 
     try {
-      const resolvedCompany = await resolveAdminSupabaseCompany();
+      const resolvedCompany = knownCompany || await resolveAdminSupabaseCompany();
       const jobs = await onsiteApi.tables.jobs.filter(
         { company_id: resolvedCompany.id },
         '-created_date'
       );
-      if (requestId !== adminJobsRequestIdRef.current) return null;
+      if (!mountedRef.current || requestId !== adminJobsRequestIdRef.current) return null;
 
       setSupabaseCompany(resolvedCompany);
       setAdminJobs(jobs);
       return resolvedCompany;
     } catch (error) {
-      if (requestId === adminJobsRequestIdRef.current) {
+      if (mountedRef.current && requestId === adminJobsRequestIdRef.current) {
         console.error('Failed to load Supabase admin jobs:', error);
-        setSupabaseCompany(null);
+        if (!knownCompany) {
+          setSupabaseCompany(null);
+        }
         setAdminJobs([]);
       }
       return null;
     }
   };
 
-  const loadAll = async () => {
-    const adminJobsLoad = loadAdminJobs();
-    const [usersRes] = await Promise.all([
-      base44.functions.invoke('getCompanyUsers', {}),
-    ]);
-    const resolvedCompany = await adminJobsLoad;
+  const loadAll = async (knownCompany) => {
+    const adminJobsLoad = loadAdminJobs(knownCompany);
+    const resolvedCompany = knownCompany || await adminJobsLoad;
 
     if (resolvedCompany) {
       try {
         const workerRows = await onsiteApi.tables.companyMembers.directory(resolvedCompany.id);
-        setTimeEntryWorkers(workerRows.map(mapDirectoryWorker));
+        if (!mountedRef.current) return;
+        const mappedWorkers = workerRows.map(mapDirectoryWorker);
+        setUsers(mappedWorkers);
+        setTimeEntryWorkers(mappedWorkers);
       } catch (error) {
-        console.error('Failed to load Supabase timesheet worker directory:', error);
+        if (!mountedRef.current) return;
+        console.error('Failed to load Supabase Admin worker directory:', error);
+        setUsers([]);
         setTimeEntryWorkers([]);
       }
     } else {
+      if (!mountedRef.current) return;
+      setUsers([]);
       setTimeEntryWorkers([]);
     }
 
-    // Build worker map - start with actual registered company users
-    const workerMap = {};
-    (usersRes?.data?.users || []).forEach(u => {
-      workerMap[u.email] = { email: u.email, name: u.full_name || u.email, role: u.role };
-    });
-    setUsers(Object.values(workerMap));
+    await adminJobsLoad;
   };
 
   const loadEntries = async () => {
-    if (!company) {
-      timeEntriesRequestIdRef.current += 1;
-      setEntries([]);
-      setAdminJobs([]);
-      setTimeEntryWorkers([]);
-      return;
-    }
-
     const requestId = timeEntriesRequestIdRef.current + 1;
     timeEntriesRequestIdRef.current = requestId;
     setEntries([]);
@@ -802,36 +838,51 @@ OnSite Timesheet`;
     }
   };
 
+  const canRemoveMember = (member) => {
+    if (!member?.user_id || !adminMembership?.role || !user?.id) return false;
+    if (member.user_id === user.id) return false;
+    if (member.role === 'owner') return false;
+    if (adminMembership.role === 'owner') return true;
+    if (adminMembership.role === 'admin') {
+      return member.role === 'worker' || member.role === 'supervisor';
+    }
+    return false;
+  };
+
   const handleRemoveWorker = async () => {
-    if (!workerToRemove) return;
+    if (!workerToRemove || removing) return;
+    if (!supabaseCompany?.id || !workerToRemove.user_id) {
+      toast.error('Unable to remove this company member');
+      return;
+    }
     setRemoving(true);
     try {
-      setUsers(users.filter(u => u.email !== workerToRemove.email));
-      setTimeEntryWorkers(workers => workers.filter(u => u.email !== workerToRemove.email));
+      await onsiteApi.tables.companyMembers.removeAdmin({
+        company_id: supabaseCompany.id,
+        user_id: workerToRemove.user_id,
+      });
+      setUsers(currentUsers => currentUsers.filter(u => u.user_id !== workerToRemove.user_id));
+      setTimeEntryWorkers(workers => workers.filter(u => u.user_id !== workerToRemove.user_id));
       toast.success(`${workerToRemove.name} removed`);
       setShowRemoveModal(false);
       setWorkerToRemove(null);
+    } catch (error) {
+      console.error('Failed to remove Supabase company member:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to remove company member');
     } finally {
       setRemoving(false);
     }
   };
 
-  const handleInviteWorker = async () => {
-    if (!inviteEmail) { toast.error('Enter an email address'); return; }
-    setInviting(true);
-    await (/** @type {typeof base44 & Base44UsersCompatibility} */ (base44)).users.inviteUser(inviteEmail, inviteRole);
-    toast.success(`Invite sent to ${inviteEmail}`);
-    setInviteEmail('');
-    setInviteRole('user');
-    setShowInviteModal(false);
-    setInviting(false);
+  const handleInviteWorkerUnavailable = () => {
+    toast.info('Secure worker invitations are temporarily unavailable while email delivery is being migrated.');
   };
 
 
 
   if (checkingAuth) return null;
 
-  const isAdmin = user?.role === 'admin' || (company && company.owner_email === user?.email);
+  const isAdmin = isAdminRole(adminMembership?.role);
 
   if (!user || !isAdmin) {
     return (
@@ -839,6 +890,7 @@ OnSite Timesheet`;
         <div className="text-5xl mb-4">🔒</div>
         <h1 className="text-xl font-black mb-2">Access Denied</h1>
         <p className="text-muted-foreground text-sm mb-6">You need admin privileges to view this page.</p>
+        {adminAuthError && <p className="text-muted-foreground text-xs mb-6">{adminAuthError}</p>}
         <Link to="/" className="px-6 py-3 rounded-2xl bg-primary text-primary-foreground font-bold text-sm">Go Home</Link>
       </div>
     );
@@ -1192,8 +1244,8 @@ OnSite Timesheet`;
       {activeTab === 'Workers' && (
         <div className="px-6">
           <div className="flex items-center justify-between mb-4">
-            <p className="text-sm text-muted-foreground">{users.length} registered workers</p>
-            <button onClick={() => setShowInviteModal(true)}
+            <p className="text-sm text-muted-foreground">{users.length} company members</p>
+            <button onClick={handleInviteWorkerUnavailable}
               className="flex items-center gap-2 px-4 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-semibold">
               <UserPlus className="w-4 h-4" /> Invite Worker
             </button>
@@ -1202,10 +1254,10 @@ OnSite Timesheet`;
             {users.length === 0 ? (
               <div className="text-center py-12">
                 <Users className="w-10 h-10 text-muted-foreground/30 mx-auto mb-3" />
-                <p className="text-muted-foreground text-sm">No workers have logged time yet</p>
+                <p className="text-muted-foreground text-sm">No company members found.</p>
               </div>
             ) : users.map(u => (
-              <div key={u.email} className="bg-card border border-border rounded-2xl p-4 flex items-center gap-3">
+              <div key={u.user_id || u.email} className="bg-card border border-border rounded-2xl p-4 flex items-center gap-3">
                 <div className="w-11 h-11 rounded-full bg-gradient-to-br from-primary/30 to-primary/10 flex items-center justify-center flex-shrink-0">
                   <span className="font-black text-primary">{u.name?.charAt(0)?.toUpperCase() || '?'}</span>
                 </div>
@@ -1213,54 +1265,19 @@ OnSite Timesheet`;
                   <p className="font-bold truncate">{u.name}</p>
                   <p className="text-xs text-muted-foreground truncate">{u.email}</p>
                 </div>
-                <button onClick={() => { setWorkerToRemove(u); setShowRemoveModal(true); }}
-                  className="w-8 h-8 rounded-lg bg-destructive/10 flex items-center justify-center flex-shrink-0">
-                  <Trash2 className="w-3.5 h-3.5 text-destructive" />
-                </button>
+                <span className="px-2 py-1 rounded-lg bg-secondary text-[10px] font-semibold text-muted-foreground uppercase">
+                  {u.role}
+                </span>
+                {canRemoveMember(u) && (
+                  <button onClick={() => { setWorkerToRemove(u); setShowRemoveModal(true); }}
+                    className="w-8 h-8 rounded-lg bg-destructive/10 flex items-center justify-center flex-shrink-0">
+                    <Trash2 className="w-3.5 h-3.5 text-destructive" />
+                  </button>
+                )}
               </div>
             ))}
           </div>
         </div>
-      )}
-
-      {/* Invite Worker Modal */}
-      {showInviteModal && createPortal(
-        <div className="fixed inset-0 z-[9999] bg-black/60 flex items-end justify-center" onClick={() => setShowInviteModal(false)}>
-          <div className="bg-card border border-border rounded-t-3xl w-full max-w-lg p-6 space-y-4" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-lg font-black">Invite Worker</h2>
-              <button onClick={() => setShowInviteModal(false)} className="w-8 h-8 rounded-xl bg-secondary flex items-center justify-center">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Email Address</label>
-                <input
-                  value={inviteEmail}
-                  onChange={e => setInviteEmail(e.target.value)}
-                  placeholder="worker@example.com"
-                  type="email"
-                  className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Role</label>
-                <select value={inviteRole} onChange={e => setInviteRole(e.target.value)}
-                  className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary">
-                  <option value="user">Worker</option>
-                  <option value="admin">Admin</option>
-                </select>
-              </div>
-            </div>
-            <button onClick={handleInviteWorker} disabled={inviting}
-              className="w-full py-3 rounded-2xl bg-primary text-primary-foreground font-bold text-sm disabled:opacity-60 transition-all active:scale-95 flex items-center justify-center gap-2">
-              <UserPlus className="w-4 h-4" />
-              {inviting ? 'Sending Invite...' : 'Send Invite'}
-            </button>
-          </div>
-        </div>,
-        document.body
       )}
 
       {/* MYOB Progress Modal */}

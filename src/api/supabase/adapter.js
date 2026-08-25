@@ -23,6 +23,7 @@ const LEAVE_TYPE_VALUES = new Set(['annual', 'sick', 'personal', 'other']);
 const LEAVE_REVIEW_STATUS_VALUES = new Set(['approved', 'declined']);
 const MESSAGE_TYPE_VALUES = new Set(['direct', 'broadcast']);
 const ADMIN_MANAGED_MEMBER_ROLE_VALUES = new Set(['admin', 'supervisor', 'worker']);
+const INVITATION_TOKEN_PATTERN = /^[0-9a-f]{48}$/;
 const EQUIPMENT_CATEGORY_VALUES = new Set(['machinery', 'tools', 'vehicle', 'safety', 'electrical', 'other']);
 const EQUIPMENT_ADMIN_STATUS_VALUES = new Set(['available', 'maintenance']);
 const AVATARS_BUCKET = 'avatars';
@@ -441,6 +442,65 @@ const mapRpcInvitationResult = (result, rpcName, expected = {}) => {
     throw new Error(`${rpcName} returned an invitation with the wrong status`);
   }
   return invitation;
+};
+
+const normalizeInvitationToken = (value) => {
+  const token = requiredText(value, 'token');
+  if (!INVITATION_TOKEN_PATTERN.test(token)) {
+    throw new Error('token must be a canonical invitation token');
+  }
+  return token;
+};
+
+const invitationAcceptParams = (values = {}) => {
+  assertOnlyKeys(values, ['invitation_id', 'token'], 'invitations.accept');
+  return {
+    p_invitation_id: normalizeLowercaseUuid(values.invitation_id, 'invitation_id'),
+    p_token: normalizeInvitationToken(values.token),
+  };
+};
+
+const mapRpcInvitationAcceptanceResult = (result, expectedInvitationId) => {
+  const invitation = result?.invitation;
+  const membership = result?.membership;
+  const profile = result?.profile;
+
+  if (!invitation || typeof invitation !== 'object' || Array.isArray(invitation)) {
+    throw new Error('accept_company_invitation returned an invalid invitation');
+  }
+  if (!membership || typeof membership !== 'object' || Array.isArray(membership)) {
+    throw new Error('accept_company_invitation returned an invalid membership');
+  }
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
+    throw new Error('accept_company_invitation returned an invalid profile');
+  }
+
+  if (normalizeLowercaseUuid(invitation.id, 'invitation.id') !== expectedInvitationId) {
+    throw new Error('accept_company_invitation returned the wrong invitation');
+  }
+  if (invitation.status !== 'accepted') {
+    throw new Error('accept_company_invitation did not accept the invitation');
+  }
+  if (hasOwn(invitation, 'token') && optionalId(invitation.token)) {
+    throw new Error('accept_company_invitation returned a token');
+  }
+
+  const invitationCompanyId = normalizeLowercaseUuid(invitation.company_id, 'invitation.company_id');
+  const membershipCompanyId = normalizeLowercaseUuid(membership.company_id, 'membership.company_id');
+  const membershipUserId = normalizeLowercaseUuid(membership.user_id, 'membership.user_id');
+  const profileId = normalizeLowercaseUuid(profile.id, 'profile.id');
+
+  if (membershipCompanyId !== invitationCompanyId) {
+    throw new Error('accept_company_invitation returned a membership for the wrong company');
+  }
+  if (membershipUserId !== profileId) {
+    throw new Error('accept_company_invitation returned a membership for the wrong user');
+  }
+  if (membership.role !== invitation.role) {
+    throw new Error('accept_company_invitation returned a membership with the wrong role');
+  }
+
+  return { invitation, membership, profile };
 };
 
 const companyMemberChangeRoleAdminParams = (values = {}) => {
@@ -1556,6 +1616,13 @@ const createInvitationsAdapter = () => ({
 
   async delete() {
     throw new Error('Direct invitation writes are unsupported; use invitations.revokeAdmin()');
+  },
+
+  async accept(values) {
+    const params = invitationAcceptParams(values);
+    const { data, error } = await supabase.rpc('accept_company_invitation', params);
+    if (error) throw error;
+    return mapRpcInvitationAcceptanceResult(data, params.p_invitation_id);
   },
 
   async createPendingAdmin(values) {

@@ -109,6 +109,39 @@ const requiredText = (value, fieldName) => {
   return trimmed;
 };
 
+const normalizeAuthEmail = (value) => {
+  const email = requiredText(value, 'email').toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error('A valid email address is required');
+  }
+  return email;
+};
+
+const normalizeAuthRedirectTo = (value) => {
+  const redirectTo = requiredText(value, 'redirectTo');
+  let parsed;
+
+  try {
+    parsed = new URL(redirectTo);
+  } catch (_error) {
+    throw new Error('A valid redirect URL is required');
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('A valid redirect URL is required');
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new Error('A valid redirect URL is required');
+  }
+
+  if (typeof window !== 'undefined' && parsed.origin !== window.location.origin) {
+    throw new Error('Redirect URL must use this app origin');
+  }
+
+  return parsed.toString();
+};
+
 const optionalNumber = (value, fieldName) => {
   if (value === undefined) return undefined;
   if (value === null || String(value).trim() === '') return null;
@@ -1935,6 +1968,42 @@ const createTeamMapAdapter = () => ({
 
 export const onsiteApi = {
   auth: {
+    async getSession() {
+      const { data, error } = await supabase.auth.getSession();
+      if (error) throw error;
+      return data?.session ?? null;
+    },
+
+    onAuthStateChange(callback) {
+      if (typeof callback !== 'function') {
+        throw new Error('onAuthStateChange callback is required');
+      }
+
+      const { data } = supabase.auth.onAuthStateChange((event, session) => {
+        callback(event, session ?? null);
+      });
+
+      return () => {
+        data?.subscription?.unsubscribe?.();
+      };
+    },
+
+    async signInWithOtp(values = {}) {
+      assertOnlyKeys(values, ['email', 'redirectTo'], 'auth.signInWithOtp');
+      const email = normalizeAuthEmail(values.email);
+      const redirectTo = normalizeAuthRedirectTo(values.redirectTo);
+
+      const { data, error } = await supabase.auth.signInWithOtp({
+        email,
+        options: {
+          emailRedirectTo: redirectTo,
+          shouldCreateUser: false,
+        },
+      });
+      if (error) throw error;
+      return data;
+    },
+
     async me() {
       const { data: userData, error: userError } = await supabase.auth.getUser();
       if (userError) throw userError;

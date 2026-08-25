@@ -1,77 +1,121 @@
-import { createContext, useContext, useState, useEffect } from 'react';
-import { base44 } from '@/api/base44Client';
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { onsiteApi } from '@/api/supabase/adapter';
+import { useAuth } from '@/lib/AuthContext';
 
 const CompanyContext = createContext(null);
 
-export function CompanyProvider({ children }) {
-  const [company, setCompany] = useState(null);
-  const [loadingCompany, setLoadingCompany] = useState(true);
+const COMPANY_STATUS = {
+  LOADING: 'loading',
+  READY: 'ready',
+  UNAUTHENTICATED: 'unauthenticated',
+  NO_MEMBERSHIP: 'no_company_membership',
+  MULTIPLE_MEMBERSHIPS: 'multiple_company_memberships',
+  ERROR: 'error',
+};
 
-  useEffect(() => {
-    loadCompany();
+const companyErrorMessage = (error) => error?.message || 'Company access could not be resolved.';
+
+export function CompanyProvider({ children }) {
+  const { user, isAuthenticated, isLoadingAuth } = useAuth();
+  const [company, setCompany] = useState(null);
+  const [membership, setMembership] = useState(null);
+  const [loadingCompany, setLoadingCompany] = useState(true);
+  const [companyError, setCompanyError] = useState(null);
+  const [companyStatus, setCompanyStatus] = useState(COMPANY_STATUS.LOADING);
+
+  const mountedRef = useRef(false);
+  const requestIdRef = useRef(0);
+
+  const clearCompany = useCallback((status, error = null) => {
+    setCompany(null);
+    setMembership(null);
+    setCompanyStatus(status);
+    setCompanyError(error);
+    setLoadingCompany(false);
   }, []);
 
-  const loadCompany = async () => {
-    try {
-      const user = await base44.auth.me();
-      const allCompanies = await base44.entities.Company.list();
+  const loadCompany = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
 
-      if (user.role === 'admin') {
-        let foundCompany = null;
-        const isAppOwner = user.email === 'paulscurfield@gmail.com' || user.email === 'paul.scurfield@icloud.com';
-
-        if (user.company_id) {
-          foundCompany = allCompanies.find(c => c.id === user.company_id);
-        }
-
-        if (!foundCompany && isAppOwner) {
-          foundCompany = allCompanies.find(c => c.owner_email === user.email);
-        }
-
-        if (foundCompany) {
-          if (user.company_id !== foundCompany.id) {
-            await base44.auth.updateMe({ company_id: foundCompany.id });
-          }
-          setCompany(foundCompany);
-        }
-        // If no company found for admin, they'll see Onboarding (company is null)
-      } else {
-        // Worker: only use saved company_id or match by who invited them
-        let foundCompany = null;
-
-        // 1. Use saved company_id if valid
-        if (user.company_id) {
-          foundCompany = allCompanies.find(c => c.id === user.company_id);
-        }
-
-        // 2. Match by inviter email (who created/invited them)
-        if (!foundCompany && user.created_by) {
-          foundCompany = allCompanies.find(c => c.owner_email === user.created_by);
-        }
-
-        // 3. Fallback: if only one company exists, assign the worker to it
-        if (!foundCompany && allCompanies.length === 1) {
-          foundCompany = allCompanies[0];
-        }
-
-        if (foundCompany) {
-          if (user.company_id !== foundCompany.id) {
-            await base44.auth.updateMe({ company_id: foundCompany.id });
-          }
-          setCompany(foundCompany);
-        }
-        // If no company found for worker, company stays null — they'll see a "contact admin" screen
-      }
-    } catch (e) {
-      console.error('Failed to load company:', e);
+    if (isLoadingAuth) {
+      setLoadingCompany(true);
+      setCompanyStatus(COMPANY_STATUS.LOADING);
+      return;
     }
-    setLoadingCompany(false);
-  };
 
-  const refreshCompany = () => loadCompany();
+    if (!isAuthenticated || !user?.id) {
+      clearCompany(COMPANY_STATUS.UNAUTHENTICATED);
+      return;
+    }
+
+    setLoadingCompany(true);
+    setCompany(null);
+    setMembership(null);
+    setCompanyError(null);
+    setCompanyStatus(COMPANY_STATUS.LOADING);
+
+    try {
+      const memberships = await onsiteApi.tables.companyMembers.filter({ user_id: user.id });
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+
+      if (memberships.length === 0) {
+        clearCompany(COMPANY_STATUS.NO_MEMBERSHIP);
+        return;
+      }
+
+      if (memberships.length > 1) {
+        clearCompany(
+          COMPANY_STATUS.MULTIPLE_MEMBERSHIPS,
+          'Multiple company memberships were found. Company selection is required before continuing.'
+        );
+        return;
+      }
+
+      const resolvedMembership = memberships[0];
+      const companies = await onsiteApi.tables.companies.filter({ id: resolvedMembership.company_id });
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+
+      if (companies.length !== 1) {
+        clearCompany(COMPANY_STATUS.ERROR, 'Company access could not be resolved.');
+        return;
+      }
+
+      setCompany(companies[0]);
+      setMembership(resolvedMembership);
+      setCompanyError(null);
+      setCompanyStatus(COMPANY_STATUS.READY);
+      setLoadingCompany(false);
+    } catch (error) {
+      console.error('Failed to load Supabase company:', error);
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      clearCompany(COMPANY_STATUS.ERROR, companyErrorMessage(error));
+    }
+  }, [clearCompany, isAuthenticated, isLoadingAuth, user?.id]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    loadCompany();
+
+    return () => {
+      mountedRef.current = false;
+      requestIdRef.current += 1;
+    };
+  }, [loadCompany]);
+
+  const refreshCompany = useCallback(() => loadCompany(), [loadCompany]);
 
   return (
-    <CompanyContext.Provider value={{ company, loadingCompany, refreshCompany, setCompany }}>
+    <CompanyContext.Provider
+      value={{
+        company,
+        membership,
+        loadingCompany,
+        companyError,
+        companyStatus,
+        refreshCompany,
+        setCompany,
+      }}
+    >
       {children}
     </CompanyContext.Provider>
   );

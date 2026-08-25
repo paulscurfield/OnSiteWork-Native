@@ -1,13 +1,11 @@
 import { Toaster } from "@/components/ui/toaster"
 import { QueryClientProvider } from '@tanstack/react-query'
 import { queryClientInstance } from '@/lib/query-client'
-import { BrowserRouter as Router, Route, Routes } from 'react-router-dom';
+import { BrowserRouter as Router, Navigate, Outlet, Route, Routes } from 'react-router-dom';
 import PageNotFound from './lib/PageNotFound';
 import { AuthProvider, useAuth } from '@/lib/AuthContext';
-import UserNotRegisteredError from '@/components/UserNotRegisteredError';
 import { Toaster as SonnerToaster } from 'sonner';
 import { CompanyProvider, useCompany } from '@/lib/companyContext';
-import { base44 } from '@/api/base44Client';
 
 // Page imports
 import Layout from './components/Layout';
@@ -23,81 +21,109 @@ import Leave from './pages/Leave';
 import Calendar from './pages/Calendar';
 import TeamMap from './pages/TeamMap';
 import SitePhotos from './pages/SitePhotos';
-import Onboarding from './pages/Onboarding';
 import PreStart from './pages/PreStart';
+import Login from './pages/Login';
+import InviteAccept from './pages/InviteAccept';
 
-const AuthenticatedApp = () => {
-  const { isLoadingAuth, isLoadingPublicSettings, authError, navigateToLogin, user } = useAuth();
-  const { company, loadingCompany, setCompany } = useCompany();
+const LoadingScreen = ({ message = 'Loading OnSite...' }) => (
+  <div className="fixed inset-0 flex items-center justify-center bg-background">
+    <div className="flex flex-col items-center gap-4">
+      <div className="w-10 h-10 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
+      <p className="text-muted-foreground text-sm">{message}</p>
+    </div>
+  </div>
+);
 
-  if (isLoadingPublicSettings || isLoadingAuth || loadingCompany) {
-    return (
-      <div className="fixed inset-0 flex items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-10 h-10 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
-          <p className="text-muted-foreground text-sm">Loading OnSite...</p>
-        </div>
+const CompanyAccessScreen = ({ title, description, detail, onRetry, onLogout }) => (
+  <div className="fixed inset-0 flex items-center justify-center bg-background px-8">
+    <div className="flex w-full max-w-sm flex-col items-center gap-6 text-center">
+      <div>
+        <h1 className="mb-2 text-2xl font-black text-foreground">{title}</h1>
+        <p className="text-sm text-muted-foreground">{description}</p>
+        {detail && <p className="mt-2 text-xs text-muted-foreground">{detail}</p>}
       </div>
+      <div className="flex w-full flex-col gap-3">
+        {onRetry && (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="w-full rounded-2xl bg-primary py-3 text-sm font-black text-primary-foreground transition-all active:scale-95"
+          >
+            Try Again
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onLogout}
+          className="w-full rounded-2xl bg-secondary py-3 text-sm font-black text-foreground transition-all active:scale-95"
+        >
+          Sign Out
+        </button>
+      </div>
+    </div>
+  </div>
+);
+
+const PrivateRouteGate = () => {
+  const { isAuthenticated, isLoadingAuth, isLoadingPublicSettings, authError, logout } = useAuth();
+  const { company, loadingCompany, companyError, companyStatus, refreshCompany } = useCompany();
+
+  if (isLoadingPublicSettings || isLoadingAuth) {
+    return <LoadingScreen />;
+  }
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
+
+  if (authError && authError.type !== 'auth_required') {
+    return (
+      <CompanyAccessScreen
+        title="Sign In Unavailable"
+        description="Authentication could not be confirmed."
+        detail={authError.message}
+        onRetry={() => window.location.reload()}
+        onLogout={() => logout()}
+      />
     );
   }
 
-  if (authError) {
-    if (authError.type === 'user_not_registered') {
-      return <UserNotRegisteredError />;
-    } else if (authError.type === 'auth_required') {
+  if (loadingCompany) {
+    return <LoadingScreen message="Loading company access..." />;
+  }
+
+  if (!company) {
+    if (companyStatus === 'no_company_membership') {
       return (
-        <div className="fixed inset-0 flex items-center justify-center bg-background px-8">
-          <div className="flex flex-col items-center gap-6 text-center">
-            <div className="text-5xl">🏗️</div>
-            <div>
-              <h1 className="text-2xl font-black text-foreground mb-1">OnSite Timesheet</h1>
-              <p className="text-muted-foreground text-sm">You need to log in to continue.</p>
-            </div>
-            <button
-              onClick={() => base44.auth.redirectToLogin(window.location.origin + '/')}
-              className="w-full max-w-xs py-4 rounded-2xl font-black text-lg"
-              style={{ backgroundColor: '#10B981', color: '#000' }}
-            >
-              Tap to Login
-            </button>
-          </div>
-        </div>
+        <CompanyAccessScreen
+          title="No Company Access Yet"
+          description="Your account is signed in, but it is not connected to a company yet."
+          detail="Ask an owner or admin to add you, then try again."
+          onRetry={refreshCompany}
+          onLogout={() => logout()}
+        />
       );
     }
-  }
 
-  // Only the original app creator (paulscurfield@gmail.com or paul.scurfield@icloud.com) should see onboarding
-  // Invited admins should never see onboarding — they join via invite like workers
-  const isAppOwner = user?.email === 'paulscurfield@gmail.com' || user?.email === 'paul.scurfield@icloud.com';
-  if (!company && user?.role === 'admin' && isAppOwner) {
-    return <Onboarding onComplete={setCompany} />;
-  }
-
-  // Worker has no company yet — show a friendly waiting screen instead of flickering
-  if (!company && user?.role !== 'admin') {
     return (
-      <div className="fixed inset-0 flex items-center justify-center bg-background px-8">
-        <div className="flex flex-col items-center gap-6 text-center">
-          <div className="text-5xl">🏗️</div>
-          <div>
-            <h1 className="text-2xl font-black text-foreground mb-1">Almost There!</h1>
-            <p className="text-muted-foreground text-sm">Your account is being set up.</p>
-            <p className="text-muted-foreground text-sm mt-1">Please wait a moment and try refreshing the page.</p>
-          </div>
-          <button
-            onClick={() => window.location.reload()}
-            className="w-full max-w-xs py-4 rounded-2xl font-black text-lg"
-            style={{ backgroundColor: '#10B981', color: '#000' }}
-          >
-            Refresh
-          </button>
-        </div>
-      </div>
+      <CompanyAccessScreen
+        title="Company Access Unavailable"
+        description="Company access could not be resolved."
+        detail={companyError}
+        onRetry={refreshCompany}
+        onLogout={() => logout()}
+      />
     );
   }
 
-  return (
-    <Routes>
+  return <Outlet />;
+};
+
+const AppRoutes = () => (
+  <Routes>
+    <Route path="/login" element={<Login />} />
+    <Route path="/invite/accept" element={<InviteAccept />} />
+    <Route element={<PrivateRouteGate />}>
       <Route element={<Layout />}>
         <Route path="/" element={<Dashboard />} />
         <Route path="/profile" element={<Profile />} />
@@ -114,9 +140,9 @@ const AuthenticatedApp = () => {
         <Route path="/prestart" element={<PreStart />} />
       </Route>
       <Route path="*" element={<PageNotFound />} />
-    </Routes>
-  );
-};
+    </Route>
+  </Routes>
+);
 
 function App() {
   return (
@@ -124,7 +150,7 @@ function App() {
       <QueryClientProvider client={queryClientInstance}>
         <Router>
           <CompanyProvider>
-            <AuthenticatedApp />
+            <AppRoutes />
           </CompanyProvider>
         </Router>
         <Toaster />

@@ -23,6 +23,15 @@ const LEAVE_TYPE_VALUES = new Set(['annual', 'sick', 'personal', 'other']);
 const LEAVE_REVIEW_STATUS_VALUES = new Set(['approved', 'declined']);
 const MESSAGE_TYPE_VALUES = new Set(['direct', 'broadcast']);
 const ADMIN_MANAGED_MEMBER_ROLE_VALUES = new Set(['admin', 'supervisor', 'worker']);
+const INVITATION_DELIVERY_ERROR_CODES = new Set([
+  'authentication_required',
+  'forbidden',
+  'invalid_request',
+  'member_exists',
+  'invitation_conflict',
+  'delivery_failed',
+  'delivery_unknown',
+]);
 const INVITATION_TOKEN_PATTERN = /^[0-9a-f]{48}$/;
 const EQUIPMENT_CATEGORY_VALUES = new Set(['machinery', 'tools', 'vehicle', 'safety', 'electrical', 'other']);
 const EQUIPMENT_ADMIN_STATUS_VALUES = new Set(['available', 'maintenance']);
@@ -534,6 +543,62 @@ const invitationRevokeAdminParams = (values = {}) => {
   return {
     p_company_id: normalizeLowercaseUuid(values.company_id, 'company_id'),
     p_invitation_id: normalizeLowercaseUuid(values.invitation_id, 'invitation_id'),
+  };
+};
+
+const invitationDeliveryParams = (values = {}) => {
+  assertOnlyKeys(values, ['company_id', 'email', 'role'], 'functions.sendCompanyInvitation');
+  return {
+    company_id: normalizeLowercaseUuid(values.company_id, 'company_id'),
+    email: normalizeInvitationEmail(values.email),
+    role: normalizeAdminManagedMemberRole(values.role),
+  };
+};
+
+const normalizeInvitationDeliveryErrorCode = (code) => (
+  INVITATION_DELIVERY_ERROR_CODES.has(code) ? code : 'invitation_delivery_failed'
+);
+
+const invitationDeliveryError = (code) => {
+  return Object.assign(new Error('Failed to send invitation'), {
+    code: normalizeInvitationDeliveryErrorCode(code),
+  });
+};
+
+const extractFunctionErrorCode = async (error) => {
+  try {
+    const context = error?.context;
+    if (context && typeof context.json === 'function') {
+      const body = await context.json();
+      return typeof body?.error === 'string' ? body.error : null;
+    }
+  } catch (_error) {
+    return null;
+  }
+  return null;
+};
+
+const mapInvitationDeliveryResult = (result) => {
+  const allowedKeys = ['ok', 'invitation_id', 'delivery', 'reused_pending'];
+  if (
+    !result ||
+    typeof result !== 'object' ||
+    Array.isArray(result) ||
+    Object.keys(result).some((key) => !allowedKeys.includes(key))
+  ) {
+    throw invitationDeliveryError('invitation_delivery_failed');
+  }
+
+  const invitationId = normalizeLowercaseUuid(result.invitation_id, 'invitation_id');
+  if (result.ok !== true || result.delivery !== 'magic_link' || typeof result.reused_pending !== 'boolean') {
+    throw invitationDeliveryError('invitation_delivery_failed');
+  }
+
+  return {
+    ok: true,
+    invitation_id: invitationId,
+    delivery: 'magic_link',
+    reused_pending: result.reused_pending,
   };
 };
 
@@ -2190,6 +2255,21 @@ export const onsiteApi = {
     messages: createMessagesAdapter(),
     messageReads: createMessageReadsAdapter(),
     invitations: createInvitationsAdapter(),
+  },
+
+  functions: {
+    async sendCompanyInvitation(values = {}) {
+      const body = invitationDeliveryParams(values);
+      const { data, error } = await supabase.functions.invoke('send-company-invitation', {
+        body,
+      });
+
+      if (error) {
+        throw invitationDeliveryError(await extractFunctionErrorCode(error));
+      }
+
+      return mapInvitationDeliveryResult(data);
+    },
   },
 
   teamMap: createTeamMapAdapter(),

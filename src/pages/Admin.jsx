@@ -85,6 +85,34 @@ const mapDirectoryWorker = (worker = {}) => ({
 
 const isAdminRole = (role) => role === 'owner' || role === 'admin';
 
+const inviteRoleOptionsFor = (role) => {
+  if (role === 'owner') return ['worker', 'supervisor', 'admin'];
+  if (role === 'admin') return ['worker', 'supervisor'];
+  return [];
+};
+
+const normalizeInviteEmail = (value) => {
+  const email = String(value || '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error('Enter a valid email address');
+  }
+  return email;
+};
+
+const invitationErrorMessage = (code) => {
+  if (code === 'member_exists') return 'That email is already a company member.';
+  if (code === 'forbidden') return 'You do not have permission to send that invitation.';
+  if (code === 'authentication_required') return 'Your session has expired. Sign in again.';
+  if (code === 'invitation_conflict') {
+    return 'An invitation for that email could not be sent. Check the email and role or try again later.';
+  }
+  if (code === 'delivery_failed') return 'The invitation email could not be sent. Try again later.';
+  if (code === 'delivery_unknown') {
+    return 'Invitation delivery could not be confirmed. It may already have been sent.';
+  }
+  return 'Failed to send invitation.';
+};
+
 /**
  * @typedef {{
  *   job_id: string,
@@ -127,6 +155,10 @@ export default function Admin() {
   const [showRemoveModal, setShowRemoveModal] = useState(false);
   const [workerToRemove, setWorkerToRemove] = useState(null);
   const [removing, setRemoving] = useState(false);
+  const [showInviteModal, setShowInviteModal] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState('worker');
+  const [inviteSending, setInviteSending] = useState(false);
   const [showMyobPickerModal, setShowMyobPickerModal] = useState(false);
   const [selectedWorkerEmails, setSelectedWorkerEmails] = useState([]);
   const [editEntry, setEditEntry] = useState(null);
@@ -874,8 +906,74 @@ OnSite Timesheet`;
     }
   };
 
-  const handleInviteWorkerUnavailable = () => {
-    toast.info('Secure worker invitations are temporarily unavailable while email delivery is being migrated.');
+  const resetInviteForm = () => {
+    setInviteEmail('');
+    setInviteRole('worker');
+  };
+
+  const closeInviteModal = () => {
+    if (inviteSending) return;
+    setShowInviteModal(false);
+    resetInviteForm();
+  };
+
+  const openInviteModal = () => {
+    if (!supabaseCompany?.id || !adminMembership?.role) {
+      toast.error('Unable to send invitations right now');
+      return;
+    }
+    const allowedRoles = inviteRoleOptionsFor(adminMembership.role);
+    if (allowedRoles.length === 0) {
+      toast.error('You do not have permission to send invitations');
+      return;
+    }
+    setInviteRole('worker');
+    setInviteEmail('');
+    setShowInviteModal(true);
+  };
+
+  const handleSendInvitation = async (event) => {
+    event.preventDefault();
+    if (inviteSending) return;
+
+    if (!supabaseCompany?.id || !adminMembership?.role) {
+      toast.error('Unable to send invitations right now');
+      return;
+    }
+
+    let normalizedEmail;
+    try {
+      normalizedEmail = normalizeInviteEmail(inviteEmail);
+    } catch (error) {
+      toast.error(error.message);
+      return;
+    }
+
+    const allowedRoles = inviteRoleOptionsFor(adminMembership.role);
+    if (!allowedRoles.includes(inviteRole)) {
+      toast.error('You do not have permission to send that invitation.');
+      return;
+    }
+
+    setInviteSending(true);
+    try {
+      const result = await onsiteApi.functions.sendCompanyInvitation({
+        company_id: supabaseCompany.id,
+        email: normalizedEmail,
+        role: inviteRole,
+      });
+      toast.success(
+        result.reused_pending
+          ? `Invitation resent to ${normalizedEmail}`
+          : `Invitation sent to ${normalizedEmail}`
+      );
+      setShowInviteModal(false);
+      resetInviteForm();
+    } catch (error) {
+      toast.error(invitationErrorMessage(error?.code));
+    } finally {
+      setInviteSending(false);
+    }
   };
 
 
@@ -883,6 +981,7 @@ OnSite Timesheet`;
   if (checkingAuth) return null;
 
   const isAdmin = isAdminRole(adminMembership?.role);
+  const inviteRoleOptions = inviteRoleOptionsFor(adminMembership?.role);
 
   if (!user || !isAdmin) {
     return (
@@ -1245,7 +1344,7 @@ OnSite Timesheet`;
         <div className="px-6">
           <div className="flex items-center justify-between mb-4">
             <p className="text-sm text-muted-foreground">{users.length} company members</p>
-            <button onClick={handleInviteWorkerUnavailable}
+            <button onClick={openInviteModal}
               className="flex items-center gap-2 px-4 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-semibold">
               <UserPlus className="w-4 h-4" /> Invite Worker
             </button>
@@ -1342,6 +1441,74 @@ OnSite Timesheet`;
               {sendingEmail ? 'Sending...' : 'Send Payroll Report'}
             </button>
           </div>
+        </div>,
+        document.body
+      )}
+
+      {/* Invite Worker Modal */}
+      {showInviteModal && createPortal(
+        <div className="fixed inset-0 z-[9999] bg-black/60 flex items-end justify-center" onClick={closeInviteModal}>
+          <form
+            onSubmit={handleSendInvitation}
+            className="bg-card border border-border rounded-t-3xl w-full max-w-lg p-6 space-y-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-lg font-black">Invite Worker</h2>
+              <button
+                type="button"
+                onClick={closeInviteModal}
+                disabled={inviteSending}
+                className="w-8 h-8 rounded-xl bg-secondary flex items-center justify-center disabled:opacity-60"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Email Address</label>
+              <input
+                value={inviteEmail}
+                onChange={e => setInviteEmail(e.target.value)}
+                placeholder="worker@example.com"
+                type="email"
+                disabled={inviteSending}
+                className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Role</label>
+              <select
+                value={inviteRole}
+                onChange={e => setInviteRole(e.target.value)}
+                disabled={inviteSending}
+                className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
+              >
+                {inviteRoleOptions.map(role => (
+                  <option key={role} value={role}>
+                    {role.charAt(0).toUpperCase() + role.slice(1)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={closeInviteModal}
+                disabled={inviteSending}
+                className="flex-1 py-3 rounded-2xl bg-secondary text-foreground font-bold text-sm disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={inviteSending}
+                className="flex-1 py-3 rounded-2xl bg-primary text-primary-foreground font-bold text-sm disabled:opacity-60 flex items-center justify-center gap-2"
+              >
+                {inviteSending && <Loader2 className="w-4 h-4 animate-spin" />}
+                {inviteSending ? 'Sending...' : 'Send Invitation'}
+              </button>
+            </div>
+          </form>
         </div>,
         document.body
       )}

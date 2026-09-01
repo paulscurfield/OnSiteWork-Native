@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { onsiteApi } from '@/api/supabase/adapter';
-import { User, Phone, Mail, Shield, Save, ChevronLeft, Camera, Loader2 } from 'lucide-react';
+import { User, Phone, Mail, Shield, Save, ChevronLeft, Camera, Loader2, LogOut } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
+import { useAuth } from '@/lib/AuthContext';
 
 const resolveSupabaseCompany = (profile, companyRows) => {
   if (!profile?.id) {
@@ -18,6 +19,7 @@ const resolveSupabaseCompany = (profile, companyRows) => {
 };
 
 export default function Profile() {
+  const { logout } = useAuth();
   const [user, setUser] = useState(null);
   const [role, setRole] = useState(null);
   const [avatarUrl, setAvatarUrl] = useState(null);
@@ -26,6 +28,7 @@ export default function Profile() {
   const [loadError, setLoadError] = useState('');
   const [saving, setSaving] = useState(false);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
   const avatarInputRef = useRef(null);
   const mountedRef = useRef(false);
   const loadRequestIdRef = useRef(0);
@@ -185,6 +188,21 @@ export default function Profile() {
     }
   };
 
+  const handleSignOut = async () => {
+    if (signingOut) return;
+    setSigningOut(true);
+    try {
+      await logout();
+    } catch (error) {
+      console.warn('Sign out failed', error);
+      toast.error('Could not sign out. Please try again.');
+    } finally {
+      if (mountedRef.current) {
+        setSigningOut(false);
+      }
+    }
+  };
+
   const roleColors = {
     owner: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
     admin: 'bg-rose-500/20 text-rose-400 border-rose-500/30',
@@ -314,6 +332,20 @@ export default function Profile() {
         >
           <Save className="w-5 h-5" />
           {saving ? 'Saving...' : loading ? 'Loading...' : 'Save Profile'}
+        </button>
+
+        <button
+          type="button"
+          onClick={handleSignOut}
+          disabled={signingOut}
+          className="w-full mb-8 py-4 rounded-2xl bg-destructive/15 text-destructive border border-destructive/30 font-bold text-base flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-60"
+        >
+          {signingOut ? (
+            <Loader2 className="w-5 h-5 animate-spin" />
+          ) : (
+            <LogOut className="w-5 h-5" />
+          )}
+          {signingOut ? 'Signing Out...' : 'Sign Out'}
         </button>
       </div>
     </div>

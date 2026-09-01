@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { base44 } from '@/api/base44Client';
 import { onsiteApi } from '@/api/supabase/adapter';
 import { Link } from 'react-router-dom';
 import { ChevronLeft, Plus, Pencil, Trash2, Download, Users, Clock, X, Check, MapPin, FileText, UserPlus, Mail, Loader2, Camera, AlertTriangle } from 'lucide-react';
@@ -419,6 +418,7 @@ ${recordDetails}
 Regards,
 OnSite Timesheet`;
 
+    const { base44 } = await import('@/api/base44Client');
     await base44.integrations.Core.SendEmail({
       to: preStartEmailAddress,
       subject: `Pre-Start Checklist Report – ${format(new Date(), 'd MMM yyyy')}`,
@@ -731,6 +731,7 @@ OnSite Timesheet`;
     const csv = buildMyobCsv(entries);
     const weekLabel = `${format(weekStart, 'd MMM')} – ${format(addDays(weekStart, 6), 'd MMM yyyy')}`;
     const body = `Hi,\n\nPlease find attached the MYOB-ready payroll timesheet export for the week of ${weekLabel}.\n\nSummary:\n- Total entries: ${entries.length}\n- Total hours: ${totalHours.toFixed(2)} hrs\n- Workers: ${[...new Set(entries.map(e => e.worker_name))].join(', ')}\n\nThis file is formatted for direct import into MYOB.\n\nRegards,\nOnSite Timesheet`;
+    const { base44 } = await import('@/api/base44Client');
     await base44.integrations.Core.SendEmail({
       to: emailAddress,
       subject: `MYOB Payroll Export – Week of ${weekLabel}`,

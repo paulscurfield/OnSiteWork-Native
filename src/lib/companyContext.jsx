@@ -14,6 +14,27 @@ const COMPANY_STATUS = {
 };
 
 const companyErrorMessage = (error) => error?.message || 'Company access could not be resolved.';
+const JWT_TIMING_RETRY_DELAY_MS = 750;
+
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const isTransientJwtTimingError = (error) => {
+  const message = error?.message || '';
+  return error?.code === 'PGRST303' || message.toLowerCase().includes('jwt issued at future');
+};
+
+const withJwtTimingRetry = async (operation) => {
+  try {
+    return await operation();
+  } catch (error) {
+    if (!isTransientJwtTimingError(error)) {
+      throw error;
+    }
+
+    await delay(JWT_TIMING_RETRY_DELAY_MS);
+    return operation();
+  }
+};
 
 export function CompanyProvider({ children }) {
   const { user, isAuthenticated, isLoadingAuth } = useAuth();
@@ -55,7 +76,9 @@ export function CompanyProvider({ children }) {
     setCompanyStatus(COMPANY_STATUS.LOADING);
 
     try {
-      const memberships = await onsiteApi.tables.companyMembers.filter({ user_id: user.id });
+      const memberships = await withJwtTimingRetry(() =>
+        onsiteApi.tables.companyMembers.filter({ user_id: user.id })
+      );
       if (!mountedRef.current || requestId !== requestIdRef.current) return;
 
       if (memberships.length === 0) {
@@ -72,7 +95,9 @@ export function CompanyProvider({ children }) {
       }
 
       const resolvedMembership = memberships[0];
-      const companies = await onsiteApi.tables.companies.filter({ id: resolvedMembership.company_id });
+      const companies = await withJwtTimingRetry(() =>
+        onsiteApi.tables.companies.filter({ id: resolvedMembership.company_id })
+      );
       if (!mountedRef.current || requestId !== requestIdRef.current) return;
 
       if (companies.length !== 1) {

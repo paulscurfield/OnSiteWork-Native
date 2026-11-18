@@ -10,6 +10,11 @@
     "lint:fix": "eslint . --fix",
     "test:w00": "node --test tests/w00/*.test.mjs",
     "test:w02": "node --test tests/w02/*.test.mjs",
+    "test:w03": "node --test tests/w03/*.test.mjs",
+    "test:w03c": "node --test tests/w03c/*.test.mjs",
+    "test:w03d": "node --test tests/w03d/*.test.mjs",
+    "test:w03e": "node --test tests/w03e/*.test.mjs",
+    "test:w03f": "node --test tests/w03f/*.test.mjs",
     "typecheck": "tsc -p ./jsconfig.json",
     "preview": "vite preview"
   },

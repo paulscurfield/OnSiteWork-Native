@@ -1,4 +1,9 @@
 import { supabase } from './client';
+import { createEquipmentReadAdapter } from './equipment-read-adapter';
+import { createJobsReadAdapter } from './jobs-read-adapter';
+import { createProfileReadAdapter } from './profile-read-adapter';
+import { createTeamDirectoryReadAdapter } from './team-directory-read-adapter';
+import { createWorkspaceAdapter } from './workspace-adapter';
 
 const orderQuery = (query, orderBy) => {
   if (!orderBy) return query;
@@ -1454,10 +1459,8 @@ const createJobsAdapter = () => ({
     return mapJobRow(data);
   },
 
-  async delete(id) {
-    const { error } = await supabase.from('jobs').delete().eq('id', id);
-    if (error) throw error;
-    return true;
+  async delete() {
+    throw new Error('Job hard deletion is unsupported');
   },
 });
 
@@ -2099,6 +2102,23 @@ const createTeamMapAdapter = () => ({
 });
 
 export const onsiteApi = {
+  equipmentRead: createEquipmentReadAdapter(tableName => supabase.from(tableName)),
+
+  jobs: createJobsReadAdapter(tableName => supabase.from(tableName)),
+
+  profileRead: createProfileReadAdapter(
+    () => supabase.auth.getUser(),
+    tableName => supabase.from(tableName)
+  ),
+
+  teamDirectory: createTeamDirectoryReadAdapter((rpcName, params) => (
+    supabase.rpc(rpcName, params)
+  )),
+
+  workspaces: createWorkspaceAdapter((rpcName, params) => (
+    params === undefined ? supabase.rpc(rpcName) : supabase.rpc(rpcName, params)
+  )),
+
   auth: {
     async getSession() {
       const { data, error } = await supabase.auth.getSession();

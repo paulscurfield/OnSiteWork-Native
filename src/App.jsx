@@ -66,9 +66,58 @@ const CompanyAccessScreen = ({ title, description, detail, onRetry, onLogout }) 
   </div>
 );
 
+const workspaceRoleLabel = role => {
+  if (role === 'owner') return 'Owner';
+  if (role === 'admin') return 'Admin';
+  return 'Worker';
+};
+
+const WorkspaceSelectionScreen = ({ workspaces, switchingWorkspaceId, onSelect, onLogout }) => (
+  <div className="fixed inset-0 flex items-center justify-center bg-background px-6">
+    <div className="w-full max-w-md rounded-3xl border border-border bg-card p-6 sm:p-8">
+      <h1 className="text-2xl font-black text-foreground">Choose a workspace</h1>
+      <p className="mt-2 text-sm leading-6 text-muted-foreground">
+        Select one of your authorised company workspaces to continue.
+      </p>
+      <div className="mt-6 space-y-3" aria-label="Authorised company workspaces">
+        {workspaces.map(workspace => (
+          <button
+            key={workspace.companyId}
+            type="button"
+            disabled={Boolean(switchingWorkspaceId)}
+            onClick={() => onSelect(workspace.companyId)}
+            className="flex min-h-14 w-full items-center justify-between gap-4 rounded-2xl border border-border bg-secondary px-4 text-left transition hover:border-primary/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-60"
+          >
+            <span className="min-w-0 truncate font-bold text-foreground">{workspace.companyName}</span>
+            <span className="flex-shrink-0 text-xs font-semibold text-muted-foreground">
+              {switchingWorkspaceId === workspace.companyId ? 'Switching…' : workspaceRoleLabel(workspace.role)}
+            </span>
+          </button>
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={onLogout}
+        className="mt-5 min-h-11 w-full rounded-2xl bg-secondary text-sm font-black text-foreground"
+      >
+        Sign Out
+      </button>
+    </div>
+  </div>
+);
+
 const PrivateRouteGate = () => {
   const { isAuthenticated, isLoadingAuth, isLoadingPublicSettings, authError, logout } = useAuth();
-  const { company, loadingCompany, companyError, companyStatus, refreshCompany } = useCompany();
+  const {
+    company,
+    workspaces,
+    loadingCompany,
+    companyError,
+    companyStatus,
+    switchingWorkspaceId,
+    refreshCompany,
+    switchWorkspace,
+  } = useCompany();
 
   if (isLoadingPublicSettings || isLoadingAuth) {
     return <LoadingScreen />;
@@ -102,6 +151,17 @@ const PrivateRouteGate = () => {
           description="Your account is signed in, but it is not connected to a company yet."
           detail="Ask an owner or admin to add you, then try again."
           onRetry={refreshCompany}
+          onLogout={() => logout()}
+        />
+      );
+    }
+
+    if (companyStatus === 'workspace_selection_required') {
+      return (
+        <WorkspaceSelectionScreen
+          workspaces={workspaces}
+          switchingWorkspaceId={switchingWorkspaceId}
+          onSelect={companyId => switchWorkspace(companyId).catch(() => undefined)}
           onLogout={() => logout()}
         />
       );

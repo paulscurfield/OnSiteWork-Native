@@ -143,7 +143,6 @@ export default function Admin() {
   const [showJobModal, setShowJobModal] = useState(false);
   const [editJob, setEditJob] = useState(null);
   const [jobSaving, setJobSaving] = useState(false);
-  const [deleteSavingId, setDeleteSavingId] = useState(null);
   const [weekStart, setWeekStart] = useState(startOfWeek(new Date(), { weekStartsOn: 4 }));
   const [jobForm, setJobForm] = useState({ job_name: '', job_number: '', location_address: '', latitude: '', longitude: '', notes: '', status: 'active' });
   const [myobExporting, setMyobExporting] = useState(false);
@@ -626,21 +625,6 @@ OnSite Timesheet`;
     }
   };
 
-  const handleDeleteJob = async (id) => {
-    if (deleteSavingId) return;
-    setDeleteSavingId(id);
-    try {
-      await onsiteApi.tables.jobs.delete(id);
-      setAdminJobs(currentJobs => currentJobs.filter(job => job.id !== id));
-      toast.success('Job deleted');
-    } catch (error) {
-      console.error('Failed to delete Supabase admin job:', error);
-      toast.error('Failed to delete job');
-    } finally {
-      setDeleteSavingId(null);
-    }
-  };
-
   const exportCSV = () => {
     const rows = [['Worker Name', 'Job Site', 'Job Number', 'Date', 'Start Time', 'Finish Time', 'Total Hours']];
     entries.forEach(e => {
@@ -1044,13 +1028,6 @@ OnSite Timesheet`;
                   <div className="flex items-center gap-2">
                     <button onClick={() => openEditJob(job)} className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center">
                       <Pencil className="w-3.5 h-3.5 text-muted-foreground" />
-                    </button>
-                    <button
-                      onClick={() => handleDeleteJob(job.id)}
-                      disabled={deleteSavingId === job.id}
-                      className="w-8 h-8 rounded-lg bg-destructive/10 flex items-center justify-center disabled:opacity-60"
-                    >
-                      <Trash2 className="w-3.5 h-3.5 text-destructive" />
                     </button>
                   </div>
                 </div>

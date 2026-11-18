@@ -1,910 +1,323 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { Link } from 'react-router-dom';
-import {
-  ArrowLeftRight,
-  Camera,
-  CheckCircle,
-  ChevronLeft,
-  Clock,
-  HardHat,
-  History,
-  LogIn,
-  LogOut,
-  Package,
-  Pencil,
-  Plus,
-  Search,
-  Trash2,
-  Truck,
-  Wrench,
-  X,
-  Zap,
-} from 'lucide-react';
-import { format, parseISO } from 'date-fns';
-import { toast } from 'sonner';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { AlertTriangle, ChevronRight, Clock3, History, Package, Search, ShieldCheck, UserRound, Wrench, X } from 'lucide-react';
 import { onsiteApi } from '@/api/supabase/adapter';
+import { useAuth } from '@/lib/AuthContext';
+import { useCompany } from '@/lib/companyContext';
+import {
+  createEquipmentScopeKey,
+  equipmentCategoryLabel,
+  equipmentHistoryActionLabel,
+  equipmentStatusLabel,
+  isEquipmentPermissionError,
+  resolveEquipmentReadScope,
+} from '@/lib/equipment-access';
 
-const categoryIcons = {
-  machinery: Truck,
-  tools: Wrench,
-  vehicle: Truck,
-  safety: HardHat,
-  electrical: Zap,
-  other: Package,
+const statusStyles = {
+  available: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
+  checked_out: 'border-amber-500/30 bg-amber-500/10 text-amber-400',
+  maintenance: 'border-rose-500/30 bg-rose-500/10 text-rose-400',
 };
 
-const statusConfig = {
-  available: { label: 'Available', color: 'text-green-400', bg: 'bg-green-500/15 border-green-500/25' },
-  checked_out: { label: 'Checked Out', color: 'text-amber-400', bg: 'bg-amber-500/15 border-amber-500/25' },
-  maintenance: { label: 'Maintenance', color: 'text-rose-400', bg: 'bg-rose-500/15 border-rose-500/25' },
+const roleLabel = role => role === 'owner' ? 'Owner' : role === 'admin' ? 'Admin' : 'Worker';
+const formatTimestamp = value => {
+  if (!value) return 'Not recorded';
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) return 'Not recorded';
+  return new Intl.DateTimeFormat('en-AU', { dateStyle: 'medium', timeStyle: 'short' }).format(timestamp);
 };
-
-const emptyAddForm = { name: '', equipment_id: '', category: 'tools', status: 'available', notes: '' };
-const adminRoles = new Set(['owner', 'admin']);
-const equipmentPhotoTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
-const equipmentPhotoMaxBytes = 20 * 1024 * 1024;
-
-const resolveSupabaseCompany = (profile, companyRows) => {
-  if (!profile?.id) {
-    throw new Error('Not authenticated with Supabase');
-  }
-  if (companyRows.length === 0) {
-    throw new Error('No Supabase company found for this user');
-  }
-  if (companyRows.length > 1) {
-    throw new Error('Multiple Supabase companies found. A company selector is required before Equipment can load safely.');
-  }
-  return companyRows[0];
-};
-
-function EquipmentPhotoThumbnail({ companyId, item, FallbackIcon }) {
-  const [photoState, setPhotoState] = useState({ photoPath: '', signedUrl: '', failed: false });
-  const currentPhotoPath = item?.photo_path || '';
-
-  useEffect(() => {
-    let cancelled = false;
-    const photoPath = item?.photo_path || '';
-    setPhotoState({ photoPath, signedUrl: '', failed: false });
-
-    if (!companyId || !item?.id || !photoPath) {
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    const loadSignedUrl = async () => {
-      try {
-        const url = await onsiteApi.tables.equipment.getPhotoSignedUrl({
-          companyId,
-          equipmentId: item.id,
-          photoPath,
-        });
-        if (!cancelled) {
-          setPhotoState(current =>
-            current.photoPath === photoPath
-              ? { photoPath, signedUrl: url, failed: false }
-              : current
-          );
-        }
-      } catch (error) {
-        if (!cancelled) {
-          console.warn('Failed to load equipment photo:', error);
-          setPhotoState(current =>
-            current.photoPath === photoPath
-              ? { photoPath, signedUrl: '', failed: true }
-              : current
-          );
-        }
-      }
-    };
-
-    loadSignedUrl();
-    return () => {
-      cancelled = true;
-    };
-  }, [companyId, item?.id, item?.photo_path]);
-
-  const showPhoto = Boolean(
-    currentPhotoPath &&
-    photoState.photoPath === currentPhotoPath &&
-    photoState.signedUrl &&
-    !photoState.failed
-  );
-  const renderedPhotoPath = currentPhotoPath;
-
-  return (
-    <div className="w-12 h-12 rounded-xl bg-secondary flex items-center justify-center flex-shrink-0 overflow-hidden">
-      {showPhoto ? (
-        <img
-          src={photoState.signedUrl}
-          alt={`${item.name || 'Equipment'} equipment`}
-          className="w-full h-full object-cover"
-          onError={() => {
-            setPhotoState(current =>
-              current.photoPath === renderedPhotoPath
-                ? { ...current, failed: true }
-                : current
-            );
-          }}
-        />
-      ) : (
-        <FallbackIcon className="w-5 h-5 text-muted-foreground" />
-      )}
-    </div>
-  );
-}
-
-/**
- * @typedef {{
- *   name: string,
- *   equipment_id: string,
- *   category: string,
- *   status: string,
- *   notes: string
- * }} EquipmentEditForm
- */
 
 export default function Equipment() {
-  const pageRequestIdRef = useRef(0);
-  const equipmentRequestIdRef = useRef(0);
-  const logsRequestIdRef = useRef(0);
-  const photoInputRef = useRef(null);
-  const photoTargetRef = useRef(null);
-  const photoActionsRef = useRef({});
-
-  const [profile, setProfile] = useState(null);
-  const [supabaseCompany, setSupabaseCompany] = useState(null);
-  const [membership, setMembership] = useState(null);
-  const [equipment, setEquipment] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState('');
+  const { user } = useAuth();
+  const { company, membership } = useCompany();
+  const registerRequestIdRef = useRef(0);
+  const detailRequestIdRef = useRef(0);
+  const historyRequestIdRef = useRef(0);
+  const [tab, setTab] = useState('register');
   const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState('all');
-  const [actionLoading, setActionLoading] = useState(null);
-  const [photoActions, setPhotoActions] = useState({});
-  const [editItem, setEditItem] = useState(null);
-  const [editForm, setEditForm] = useState(/** @type {EquipmentEditForm} */ ({}));
-  const [editSaving, setEditSaving] = useState(false);
-  const [showAdd, setShowAdd] = useState(false);
-  const [addForm, setAddForm] = useState(emptyAddForm);
-  const [addSaving, setAddSaving] = useState(false);
-  const [tab, setTab] = useState('equipment');
-  const [logs, setLogs] = useState([]);
-  const [logsLoading, setLogsLoading] = useState(false);
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [register, setRegister] = useState([]);
+  const [registerScopeKey, setRegisterScopeKey] = useState(null);
+  const [registerState, setRegisterState] = useState('loading');
+  const [selectedEquipmentId, setSelectedEquipmentId] = useState(null);
+  const [detail, setDetail] = useState(null);
+  const [detailResultKey, setDetailResultKey] = useState(null);
+  const [detailState, setDetailState] = useState('idle');
+  const [history, setHistory] = useState([]);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyScopeKey, setHistoryScopeKey] = useState(null);
+  const [historyState, setHistoryState] = useState('idle');
 
-  const isAdmin = adminRoles.has(membership?.role);
-
-  const updateEquipmentRow = (updatedItem) => {
-    setEquipment(currentEquipment =>
-      currentEquipment.map(item => item.id === updatedItem.id ? updatedItem : item)
-    );
-  };
-
-  const startPhotoAction = (equipmentId, action) => {
-    if (photoActionsRef.current[equipmentId]) return false;
-    photoActionsRef.current = {
-      ...photoActionsRef.current,
-      [equipmentId]: action,
-    };
-    setPhotoActions(current => ({
-      ...current,
-      [equipmentId]: action,
-    }));
-    equipmentRequestIdRef.current += 1;
-    return true;
-  };
-
-  const finishPhotoAction = (equipmentId) => {
-    const nextActions = { ...photoActionsRef.current };
-    delete nextActions[equipmentId];
-    photoActionsRef.current = nextActions;
-    setPhotoActions(current => {
-      const next = { ...current };
-      delete next[equipmentId];
-      return next;
-    });
-  };
-
-  const refreshEquipment = useCallback(async () => {
-    if (!supabaseCompany?.id) return;
-    const requestId = equipmentRequestIdRef.current + 1;
-    equipmentRequestIdRef.current = requestId;
-
-    try {
-      const rows = await onsiteApi.tables.equipment.filter(
-        { company_id: supabaseCompany.id },
-        '-created_at'
-      );
-      if (requestId !== equipmentRequestIdRef.current) return;
-      setEquipment(rows);
-    } catch (error) {
-      if (requestId !== equipmentRequestIdRef.current) return;
-      console.error('Failed to load Supabase equipment:', error);
-      setEquipment([]);
-      toast.error('Failed to load equipment');
-    }
-  }, [supabaseCompany?.id]);
+  const equipmentScope = useMemo(() => resolveEquipmentReadScope({
+    userId: user?.id,
+    company,
+    membership,
+  }), [company, membership, user?.id]);
+  const equipmentScopeKey = createEquipmentScopeKey(equipmentScope);
+  const hasCurrentRegister = Boolean(equipmentScopeKey) && registerScopeKey === equipmentScopeKey;
+  const visibleRegister = hasCurrentRegister ? register : [];
+  const visibleRegisterState = !equipmentScope ? 'unavailable' : hasCurrentRegister ? registerState : 'loading';
+  const selectedResultKey = selectedEquipmentId && equipmentScopeKey ? `${equipmentScopeKey}:${selectedEquipmentId}` : null;
+  const visibleDetail = selectedResultKey && detailResultKey === selectedResultKey ? detail : null;
+  const visibleDetailState = !selectedEquipmentId ? 'idle' : detailResultKey === selectedResultKey ? detailState : 'loading';
+  const hasCurrentHistory = Boolean(equipmentScopeKey) && historyScopeKey === equipmentScopeKey;
+  const visibleHistory = hasCurrentHistory ? history : [];
+  const visibleHistoryState = !equipmentScope ? 'unavailable' : hasCurrentHistory ? historyState : 'loading';
 
   useEffect(() => {
-    const requestId = pageRequestIdRef.current + 1;
-    pageRequestIdRef.current = requestId;
-    const equipmentRequestId = equipmentRequestIdRef.current + 1;
-    equipmentRequestIdRef.current = equipmentRequestId;
+    const requestId = registerRequestIdRef.current + 1;
+    registerRequestIdRef.current = requestId;
+    detailRequestIdRef.current += 1;
+    historyRequestIdRef.current += 1;
+    setRegister([]);
+    setRegisterScopeKey(null);
+    setSelectedEquipmentId(null);
+    setDetail(null);
+    setDetailResultKey(null);
+    setDetailState('idle');
+    setHistory([]);
+    setHistoryScopeKey(null);
+    setHistoryState('idle');
 
-    setLoading(true);
-    setLoadError('');
-    setProfile(null);
-    setSupabaseCompany(null);
-    setMembership(null);
-    setEquipment([]);
+    if (!equipmentScope || !equipmentScopeKey) {
+      setRegisterState('unavailable');
+      return;
+    }
 
-    const loadEquipmentPage = async () => {
-      try {
-        const [resolvedProfile, companyRows] = await Promise.all([
-          onsiteApi.auth.me(),
-          onsiteApi.tables.companies.list('name'),
-        ]);
-        if (requestId !== pageRequestIdRef.current) return;
+    setRegisterState('loading');
+    onsiteApi.equipmentRead.list(equipmentScope.companyId)
+      .then(items => {
+        if (requestId !== registerRequestIdRef.current) return;
+        setRegister(items);
+        setRegisterScopeKey(equipmentScopeKey);
+        setRegisterState(items.length === 0 ? 'empty' : 'ready');
+      })
+      .catch(error => {
+        if (requestId !== registerRequestIdRef.current) return;
+        console.error('Failed to load Supabase equipment register:', error);
+        setRegister([]);
+        setRegisterScopeKey(equipmentScopeKey);
+        setRegisterState(isEquipmentPermissionError(error) ? 'denied' : 'error');
+      });
 
-        const resolvedCompany = resolveSupabaseCompany(resolvedProfile, companyRows);
-        const memberRows = await onsiteApi.tables.companyMembers.filter({
-          company_id: resolvedCompany.id,
-          user_id: resolvedProfile.id,
-        });
-        if (requestId !== pageRequestIdRef.current) return;
-
-        const resolvedMembership = memberRows[0];
-        if (!resolvedMembership) {
-          throw new Error('Supabase company membership is not available for this user');
-        }
-
-        const equipmentRows = await onsiteApi.tables.equipment.filter(
-          { company_id: resolvedCompany.id },
-          '-created_at'
-        );
-        if (
-          requestId !== pageRequestIdRef.current ||
-          equipmentRequestId !== equipmentRequestIdRef.current
-        ) {
-          return;
-        }
-
-        setProfile(resolvedProfile);
-        setSupabaseCompany(resolvedCompany);
-        setMembership(resolvedMembership);
-        setEquipment(equipmentRows);
-      } catch (error) {
-        if (requestId === pageRequestIdRef.current) {
-          console.error('Failed to load Supabase equipment page:', error);
-          setProfile(null);
-          setSupabaseCompany(null);
-          setMembership(null);
-          setEquipment([]);
-          setLogs([]);
-          setLoadError(error?.message || 'Failed to load equipment');
-          toast.error('Failed to load equipment');
-        }
-      } finally {
-        if (requestId === pageRequestIdRef.current) {
-          setLoading(false);
-        }
-      }
-    };
-
-    loadEquipmentPage();
-    return () => {
-      pageRequestIdRef.current += 1;
-      equipmentRequestIdRef.current += 1;
-      logsRequestIdRef.current += 1;
-    };
-  }, []);
+    return () => { registerRequestIdRef.current += 1; };
+  }, [equipmentScope, equipmentScopeKey]);
 
   useEffect(() => {
-    if (tab !== 'history') return undefined;
+    const requestId = detailRequestIdRef.current + 1;
+    detailRequestIdRef.current = requestId;
+    setDetail(null);
+    setDetailResultKey(null);
 
-    if (!supabaseCompany?.id) {
-      setLogs([]);
-      setLogsLoading(false);
-      return undefined;
-    }
-
-    const requestId = logsRequestIdRef.current + 1;
-    logsRequestIdRef.current = requestId;
-    setLogsLoading(true);
-
-    const loadLogs = async () => {
-      try {
-        const rows = await onsiteApi.tables.equipmentLogs.filter(
-          { company_id: supabaseCompany.id },
-          '-timestamp',
-          100
-        );
-        if (requestId !== logsRequestIdRef.current) return;
-        setLogs(rows);
-      } catch (error) {
-        if (requestId === logsRequestIdRef.current) {
-          console.error('Failed to load Supabase equipment history:', error);
-          setLogs([]);
-          toast.error('Failed to load equipment history');
-        }
-      } finally {
-        if (requestId === logsRequestIdRef.current) {
-          setLogsLoading(false);
-        }
-      }
-    };
-
-    loadLogs();
-    return () => {
-      logsRequestIdRef.current += 1;
-    };
-  }, [tab, supabaseCompany?.id]);
-
-  const handleCheckout = async (item) => {
-    if (!supabaseCompany?.id) {
-      toast.error('Supabase company is not ready yet');
+    if (!equipmentScope || !selectedEquipmentId || !selectedResultKey) {
+      setDetailState('idle');
       return;
     }
 
-    setActionLoading(item.id);
-    try {
-      await onsiteApi.tables.equipment.checkout(item.id, supabaseCompany.id);
-      toast.success(`${item.name} checked out!`);
-      await refreshEquipment();
-    } catch (error) {
-      console.error('Failed to check out Supabase equipment:', error);
-      toast.error('Failed to check out equipment');
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleReturn = async (item) => {
-    if (!supabaseCompany?.id) {
-      toast.error('Supabase company is not ready yet');
-      return;
-    }
-
-    setActionLoading(item.id);
-    try {
-      await onsiteApi.tables.equipment.returnEquipment(item.id, supabaseCompany.id);
-      toast.success(`${item.name} returned!`);
-      await refreshEquipment();
-    } catch (error) {
-      console.error('Failed to return Supabase equipment:', error);
-      toast.error('Failed to return equipment');
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleDelete = async (item) => {
-    if (!isAdmin) return;
-    setActionLoading(`delete-${item.id}`);
-
-    try {
-      await onsiteApi.tables.equipment.deleteAdmin(item.id);
-      setEquipment(currentEquipment => currentEquipment.filter(e => e.id !== item.id));
-      toast.success(`${item.name} deleted`);
-    } catch (error) {
-      console.error('Failed to delete Supabase equipment:', error);
-      toast.error('Failed to delete equipment');
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const validateSelectedPhoto = (file) => {
-    const size = Number(file?.size);
-    if (!Number.isFinite(size) || size <= 0) {
-      toast.error('Photo file is empty');
-      return false;
-    }
-    if (size > equipmentPhotoMaxBytes) {
-      toast.error('Photo must be 20 MB or smaller');
-      return false;
-    }
-    const mimeType = typeof file?.type === 'string' ? file.type.trim() : '';
-    if (!equipmentPhotoTypes.has(mimeType)) {
-      toast.error('Photo must be JPEG, PNG or WebP');
-      return false;
-    }
-    return true;
-  };
-
-  const openPhotoPicker = (item) => {
-    if (!isAdmin) return;
-    if (photoActionsRef.current[item.id]) return;
-    photoTargetRef.current = item;
-    if (photoInputRef.current) {
-      photoInputRef.current.value = '';
-      photoInputRef.current.click();
-    }
-  };
-
-  const handlePhotoFileChange = async (event) => {
-    const file = event.target.files?.[0];
-    const item = photoTargetRef.current;
-    photoTargetRef.current = null;
-
-    if (event.target) {
-      event.target.value = '';
-    }
-    if (!file || !item) return;
-    if (!isAdmin) return;
-    if (!supabaseCompany?.id) {
-      toast.error('Supabase company is not ready yet');
-      return;
-    }
-    if (!validateSelectedPhoto(file)) return;
-    if (!startPhotoAction(item.id, 'replace')) return;
-
-    try {
-      const result = await onsiteApi.tables.equipment.replacePhotoAdmin({
-        companyId: supabaseCompany.id,
-        equipmentId: item.id,
-        file,
+    setDetailState('loading');
+    onsiteApi.equipmentRead.get(equipmentScope.companyId, selectedEquipmentId)
+      .then(item => {
+        if (requestId !== detailRequestIdRef.current) return;
+        setDetail(item);
+        setDetailResultKey(selectedResultKey);
+        setDetailState(item ? 'ready' : 'unavailable');
+      })
+      .catch(error => {
+        if (requestId !== detailRequestIdRef.current) return;
+        console.error('Failed to load Supabase equipment detail:', error);
+        setDetail(null);
+        setDetailResultKey(selectedResultKey);
+        setDetailState(isEquipmentPermissionError(error) ? 'denied' : 'error');
       });
-      equipmentRequestIdRef.current += 1;
-      updateEquipmentRow(result.equipment);
-      toast.success(item.photo_path ? 'Photo updated' : 'Photo added');
-      if (result.cleanup_warning) {
-        toast.warning(result.cleanup_warning);
-      }
-    } catch (error) {
-      console.error('Failed to update Supabase equipment photo:', error);
-      toast.error('Failed to update equipment photo');
-      await refreshEquipment();
-    } finally {
-      finishPhotoAction(item.id);
-    }
-  };
 
-  const handleClearPhoto = async (item) => {
-    if (!isAdmin || !item?.photo_path) return;
-    if (!supabaseCompany?.id) {
-      toast.error('Supabase company is not ready yet');
-      return;
-    }
-    if (!startPhotoAction(item.id, 'clear')) return;
+    return () => { detailRequestIdRef.current += 1; };
+  }, [equipmentScope, selectedEquipmentId, selectedResultKey]);
 
-    try {
-      const result = await onsiteApi.tables.equipment.clearPhotoAdmin({
-        companyId: supabaseCompany.id,
-        equipmentId: item.id,
-      });
-      equipmentRequestIdRef.current += 1;
-      updateEquipmentRow(result.equipment);
-      toast.success('Photo removed');
-      if (result.cleanup_warning) {
-        toast.warning(result.cleanup_warning);
-      }
-    } catch (error) {
-      console.error('Failed to remove Supabase equipment photo:', error);
-      toast.error('Failed to remove equipment photo');
-      await refreshEquipment();
-    } finally {
-      finishPhotoAction(item.id);
-    }
-  };
-
-  const openEdit = (item) => {
-    if (!isAdmin) return;
-    setEditItem(item);
-    setEditForm({
-      name: item.name || '',
-      equipment_id: item.equipment_id || '',
-      category: item.category || 'tools',
-      status: item.status || 'available',
-      notes: item.notes || '',
-    });
-  };
-
-  const handleEditSave = async () => {
-    if (!isAdmin || !editItem) return;
-    setEditSaving(true);
-
-    try {
-      const payload = {
-        name: editForm.name,
-        equipment_id: editForm.equipment_id,
-        category: editForm.category,
-        notes: editForm.notes,
-      };
-      if (editItem.status !== 'checked_out') {
-        payload.status = editForm.status;
-      }
-
-      const updatedItem = await onsiteApi.tables.equipment.updateAdmin(editItem.id, payload);
-      setEquipment(currentEquipment =>
-        currentEquipment.map(item => item.id === updatedItem.id ? updatedItem : item)
-      );
-      toast.success('Equipment updated');
-      setEditItem(null);
-    } catch (error) {
-      console.error('Failed to update Supabase equipment:', error);
-      toast.error('Failed to update equipment');
-    } finally {
-      setEditSaving(false);
-    }
-  };
-
-  const handleAddSave = async () => {
-    if (!isAdmin) return;
-    if (!supabaseCompany?.id) {
-      toast.error('Supabase company is not ready yet');
-      return;
-    }
-    if (!addForm.name || !addForm.equipment_id) {
-      toast.error('Name and Equipment ID are required');
+  useEffect(() => {
+    if (tab !== 'history') {
+      historyRequestIdRef.current += 1;
       return;
     }
 
-    setAddSaving(true);
-    try {
-      const newItem = await onsiteApi.tables.equipment.createAdmin({
-        company_id: supabaseCompany.id,
-        name: addForm.name,
-        equipment_id: addForm.equipment_id,
-        category: addForm.category,
-        status: addForm.status,
-        notes: addForm.notes,
-      });
-      setEquipment(currentEquipment => [newItem, ...currentEquipment]);
-      toast.success(`${addForm.name} added!`);
-      setShowAdd(false);
-      setAddForm(emptyAddForm);
-    } catch (error) {
-      console.error('Failed to create Supabase equipment:', error);
-      toast.error('Failed to add equipment');
-    } finally {
-      setAddSaving(false);
-    }
-  };
+    const requestId = historyRequestIdRef.current + 1;
+    historyRequestIdRef.current = requestId;
+    setHistory([]);
+    setHistoryHasMore(false);
+    setHistoryScopeKey(null);
 
-  const filtered = equipment
-    .filter(e => {
-      const matchSearch = e.name?.toLowerCase().includes(search.toLowerCase()) || e.equipment_id?.toLowerCase().includes(search.toLowerCase());
-      const matchFilter = filter === 'all' || e.status === filter;
-      return matchSearch && matchFilter;
+    if (!equipmentScope || !equipmentScopeKey) {
+      setHistoryState('unavailable');
+      return;
+    }
+
+    setHistoryState('loading');
+    onsiteApi.equipmentRead.history({
+      companyId: equipmentScope.companyId,
+      userId: equipmentScope.userId,
+      role: equipmentScope.role,
     })
-    .sort((a, b) => {
-      const order = { checked_out: 0, maintenance: 1, available: 2 };
-      return (order[a.status] ?? 2) - (order[b.status] ?? 2);
-    });
+      .then(result => {
+        if (requestId !== historyRequestIdRef.current) return;
+        setHistory(result.items);
+        setHistoryHasMore(result.has_more);
+        setHistoryScopeKey(equipmentScopeKey);
+        setHistoryState(result.items.length === 0 ? 'empty' : 'ready');
+      })
+      .catch(error => {
+        if (requestId !== historyRequestIdRef.current) return;
+        console.error('Failed to load Supabase equipment history:', error);
+        setHistory([]);
+        setHistoryScopeKey(equipmentScopeKey);
+        setHistoryState(isEquipmentPermissionError(error) ? 'denied' : 'error');
+      });
+
+    return () => { historyRequestIdRef.current += 1; };
+  }, [equipmentScope, equipmentScopeKey, tab]);
+
+  const filteredRegister = visibleRegister.filter(item => {
+    const query = search.trim().toLowerCase();
+    const matchesSearch = !query || item.name.toLowerCase().includes(query) || item.equipment_id.toLowerCase().includes(query);
+    return matchesSearch && (statusFilter === 'all' || item.status === statusFilter);
+  });
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="px-6 pt-14 pb-4 flex items-center gap-4">
-        <Link to="/" className="w-9 h-9 rounded-xl bg-secondary flex items-center justify-center">
-          <ChevronLeft className="w-5 h-5" />
-        </Link>
-        <h1 className="text-2xl font-black flex-1">Equipment</h1>
-        {tab === 'equipment' && isAdmin && (
-          <button onClick={() => setShowAdd(true)} className="w-9 h-9 rounded-xl bg-primary flex items-center justify-center">
-            <Plus className="w-5 h-5 text-primary-foreground" />
-          </button>
+      <div className="mx-auto max-w-6xl px-5 pb-24 pt-10 sm:px-8 lg:pb-12 lg:pt-16">
+        <header className="rounded-3xl border border-border bg-card p-6 sm:p-8">
+          <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 text-primary"><Wrench className="h-7 w-7" aria-hidden="true" /></span>
+          <p className="mt-6 text-xs font-bold uppercase tracking-[0.18em] text-primary">{equipmentScope?.companyName || 'Company workspace'}</p>
+          <h1 className="mt-2 text-3xl font-black tracking-tight">Equipment</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            {equipmentScope ? `Read-only register · Signed-in role: ${roleLabel(equipmentScope.role)}` : 'An active company workspace is required.'}
+          </p>
+        </header>
+
+        <div className="mt-5 flex gap-2" role="tablist" aria-label="Equipment information">
+          <TabButton active={tab === 'register'} onClick={() => setTab('register')} icon={Package} label="Register" />
+          <TabButton active={tab === 'history'} onClick={() => setTab('history')} icon={History} label="History" />
+        </div>
+
+        {tab === 'register' ? (
+          <>
+            <div className="mt-5 grid gap-3 sm:grid-cols-[1fr_auto]">
+              <label className="flex items-center gap-3 rounded-2xl border border-border bg-card px-4 py-3">
+                <Search className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                <span className="sr-only">Search equipment</span>
+                <input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search name or equipment ID" className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground" />
+              </label>
+              <select value={statusFilter} onChange={event => setStatusFilter(event.target.value)} aria-label="Filter equipment status" className="rounded-2xl border border-border bg-card px-4 py-3 text-sm font-semibold outline-none">
+                <option value="all">All statuses</option>
+                <option value="available">Available</option>
+                <option value="checked_out">Checked out</option>
+                <option value="maintenance">Maintenance</option>
+              </select>
+            </div>
+            <RegisterContent state={visibleRegisterState} items={filteredRegister} hasUnfilteredItems={visibleRegister.length > 0} onSelect={item => setSelectedEquipmentId(item.id)} />
+          </>
+        ) : (
+          <HistoryContent state={visibleHistoryState} items={visibleHistory} hasMore={historyHasMore} role={equipmentScope?.role} />
         )}
       </div>
 
-      <div className="px-6 mb-4 flex gap-2">
-        <button onClick={() => setTab('equipment')}
-          className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${tab === 'equipment' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground'}`}>
-          <Wrench className="w-4 h-4" /> Equipment
-        </button>
-        <button onClick={() => setTab('history')}
-          className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${tab === 'history' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground'}`}>
-          <History className="w-4 h-4" /> History
-        </button>
-      </div>
-
-      {tab === 'equipment' && <>
-      <div className="px-6 mb-3">
-        <div className="flex items-center gap-3 bg-card border border-border rounded-2xl px-4 py-3">
-          <Search className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search equipment..."
-            className="bg-transparent flex-1 outline-none text-sm placeholder:text-muted-foreground" />
-        </div>
-      </div>
-
-      <div className="px-6 mb-4 flex gap-2">
-        {['all', 'available', 'checked_out', 'maintenance'].map(f => (
-          <button key={f} onClick={() => setFilter(f)}
-            className={`px-3 py-1.5 rounded-xl text-xs font-semibold capitalize transition-all ${filter === f ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground'}`}>
-            {f === 'checked_out' ? 'Out' : f === 'all' ? 'All' : f.charAt(0).toUpperCase() + f.slice(1)}
-          </button>
-        ))}
-      </div>
-      </>}
-
-      {editItem && createPortal(
-        <div className="fixed inset-0 z-[9999] bg-black/60 flex items-end justify-center" onClick={() => setEditItem(null)}>
-          <div className="bg-card border border-border rounded-t-3xl w-full max-w-lg p-6 space-y-4" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-lg font-black">Edit Equipment</h2>
-              <button onClick={() => setEditItem(null)} className="w-8 h-8 rounded-xl bg-secondary flex items-center justify-center">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Name</label>
-                <input value={editForm.name} onChange={e => setEditForm({...editForm, name: e.target.value})}
-                  className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary" />
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Equipment ID</label>
-                <input value={editForm.equipment_id} onChange={e => setEditForm({...editForm, equipment_id: e.target.value})}
-                  className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary" />
-              </div>
-              <div className="flex gap-3">
-                <div className="flex-1">
-                  <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Category</label>
-                  <select value={editForm.category} onChange={e => setEditForm({...editForm, category: e.target.value})}
-                    className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary">
-                    {['machinery','tools','vehicle','safety','electrical','other'].map(c => (
-                      <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="flex-1">
-                  <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Status</label>
-                  {editItem.status === 'checked_out' ? (
-                    <div className="mt-1">
-                      <div className="w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm text-muted-foreground">
-                        Checked Out
-                      </div>
-                      <p className="mt-1 text-[11px] text-muted-foreground/70">Checkout state is controlled by Checkout/Return.</p>
-                    </div>
-                  ) : (
-                    <select value={editForm.status} onChange={e => setEditForm({...editForm, status: e.target.value})}
-                      className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary">
-                      <option value="available">Available</option>
-                      <option value="maintenance">Maintenance</option>
-                    </select>
-                  )}
-                </div>
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Notes</label>
-                <textarea value={editForm.notes} onChange={e => setEditForm({...editForm, notes: e.target.value})}
-                  rows={2} className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary resize-none" />
-              </div>
-            </div>
-            <button onClick={handleEditSave} disabled={editSaving}
-              className="w-full py-3 rounded-2xl bg-primary text-primary-foreground font-bold text-sm disabled:opacity-60 transition-all active:scale-95">
-              {editSaving ? 'Saving...' : 'Save Changes'}
-            </button>
-          </div>
-        </div>,
-        document.body
-      )}
-
-      {showAdd && isAdmin && createPortal(
-        <div className="fixed inset-0 z-[9999] bg-black/60 flex items-end justify-center" onClick={() => setShowAdd(false)}>
-          <div className="bg-card border border-border rounded-t-3xl w-full max-w-lg p-6 space-y-4" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-lg font-black">Add Equipment</h2>
-              <button onClick={() => setShowAdd(false)} className="w-8 h-8 rounded-xl bg-secondary flex items-center justify-center">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Name *</label>
-                <input value={addForm.name} onChange={e => setAddForm({...addForm, name: e.target.value})}
-                  placeholder="e.g. Angle Grinder"
-                  className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary" />
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Equipment ID *</label>
-                <input value={addForm.equipment_id} onChange={e => setAddForm({...addForm, equipment_id: e.target.value})}
-                  placeholder="e.g. EQ-001"
-                  className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary" />
-              </div>
-              <div className="flex gap-3">
-                <div className="flex-1">
-                  <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Category</label>
-                  <select value={addForm.category} onChange={e => setAddForm({...addForm, category: e.target.value})}
-                    className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary">
-                    {['machinery','tools','vehicle','safety','electrical','other'].map(c => (
-                      <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="flex-1">
-                  <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Status</label>
-                  <select value={addForm.status} onChange={e => setAddForm({...addForm, status: e.target.value})}
-                    className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary">
-                    <option value="available">Available</option>
-                    <option value="maintenance">Maintenance</option>
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Notes</label>
-                <textarea value={addForm.notes} onChange={e => setAddForm({...addForm, notes: e.target.value})}
-                  rows={2} placeholder="Optional notes..."
-                  className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary resize-none" />
-              </div>
-            </div>
-            <button onClick={handleAddSave} disabled={addSaving}
-              className="w-full py-3 rounded-2xl bg-primary text-primary-foreground font-bold text-sm disabled:opacity-60 transition-all active:scale-95">
-              {addSaving ? 'Adding...' : 'Add Equipment'}
-            </button>
-          </div>
-        </div>,
-        document.body
-      )}
-
-      {isAdmin && (
-        <input
-          ref={photoInputRef}
-          type="file"
-          accept="image/jpeg,image/png,image/webp"
-          className="hidden"
-          onChange={handlePhotoFileChange}
-        />
-      )}
-
-      {tab === 'history' && (
-        <div className="px-6 space-y-3">
-          {logsLoading ? (
-            Array(5).fill(0).map((_, i) => <div key={i} className="h-16 rounded-2xl bg-card border border-border animate-pulse" />)
-          ) : logs.length === 0 ? (
-            <div className="text-center py-16">
-              <History className="w-12 h-12 text-muted-foreground/30 mx-auto mb-3" />
-              <p className="text-muted-foreground">No history yet</p>
-            </div>
-          ) : logs.map(log => (
-            <div key={log.id} className="bg-card border border-border rounded-2xl px-4 py-3 flex items-center gap-3">
-              <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${log.action === 'checked_out' ? 'bg-amber-500/15' : 'bg-green-500/15'}`}>
-                {log.action === 'checked_out'
-                  ? <LogOut className="w-4 h-4 text-amber-400" />
-                  : <LogIn className="w-4 h-4 text-green-400" />}
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="font-semibold text-sm truncate">{log.equipment_name}</p>
-                <p className="text-xs text-muted-foreground">
-                  <span className={log.action === 'checked_out' ? 'text-amber-400 font-semibold' : 'text-green-400 font-semibold'}>
-                    {log.action === 'checked_out' ? 'Checked out' : 'Returned'}
-                  </span>
-                  {' '}by {log.worker_name || log.worker_email}
-                </p>
-              </div>
-              <div className="text-right flex-shrink-0">
-                {log.timestamp && (
-                  <>
-                    <p className="text-xs text-muted-foreground">{format(parseISO(log.timestamp), 'd MMM')}</p>
-                    <p className="text-xs text-muted-foreground/60">{format(parseISO(log.timestamp), 'h:mm a')}</p>
-                  </>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {tab === 'equipment' && <div className="px-6 space-y-3">
-        {loading ? (
-          Array(4).fill(0).map((_, i) => <div key={i} className="h-28 rounded-2xl bg-card border border-border animate-pulse" />)
-        ) : loadError ? (
-          <div className="text-center py-16">
-            <Wrench className="w-12 h-12 text-muted-foreground/30 mx-auto mb-3" />
-            <p className="text-muted-foreground">{loadError}</p>
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="text-center py-16">
-            <Wrench className="w-12 h-12 text-muted-foreground/30 mx-auto mb-3" />
-            <p className="text-muted-foreground">No equipment found</p>
-          </div>
-        ) : filtered.map(item => {
-          const Icon = categoryIcons[item.category] || Package;
-          const sc = statusConfig[item.status] || statusConfig.available;
-          const isMyCheckout = item.checked_out_by_id === profile?.id;
-          const isPhotoBusy = Boolean(photoActions[item.id]);
-
-          return (
-            <div key={item.id} className="bg-card border border-border rounded-2xl p-4">
-              <div className="flex items-start gap-3">
-                <EquipmentPhotoThumbnail companyId={supabaseCompany?.id} item={item} FallbackIcon={Icon} />
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <p className="font-bold">{item.name}</p>
-                      <p className="text-xs text-muted-foreground font-mono">{item.equipment_id}</p>
-                    </div>
-                    <div className="flex items-center gap-1.5 flex-shrink-0">
-                      <span className={`text-[10px] px-2 py-1 rounded-full border font-semibold uppercase ${sc.bg} ${sc.color}`}>
-                        {sc.label}
-                      </span>
-                      {isAdmin && (
-                        <>
-                          <button onClick={() => openEdit(item)} className="w-7 h-7 rounded-lg bg-secondary flex items-center justify-center hover:bg-primary/20 transition-colors">
-                            <Pencil className="w-3.5 h-3.5 text-muted-foreground" />
-                          </button>
-                          <button
-                            onClick={() => handleDelete(item)}
-                            disabled={actionLoading === `delete-${item.id}`}
-                            className="w-7 h-7 rounded-lg bg-destructive/10 flex items-center justify-center hover:bg-destructive/20 transition-colors disabled:opacity-60"
-                          >
-                            <Trash2 className="w-3.5 h-3.5 text-destructive" />
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-
-                  {item.status === 'checked_out' && (
-                    <div className="flex items-center gap-1.5 mt-2">
-                      <div className="w-5 h-5 rounded-full bg-muted flex items-center justify-center">
-                        <span className="text-[9px] font-bold">{item.checked_out_by_name?.charAt(0)}</span>
-                      </div>
-                      <p className="text-xs text-muted-foreground">{item.checked_out_by_name}</p>
-                      {item.checked_out_at && (
-                        <>
-                          <span className="text-muted-foreground/40">·</span>
-                          <Clock className="w-3 h-3 text-muted-foreground/60" />
-                          <p className="text-xs text-muted-foreground/60">
-                            {format(parseISO(item.checked_out_at), 'h:mm a')}
-                          </p>
-                        </>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <Link
-                      to={`/prestart?equipment_id=${encodeURIComponent(item.id)}`}
-                      className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-secondary text-muted-foreground text-xs font-semibold transition-all active:scale-95"
-                    >
-                      <CheckCircle className="w-3.5 h-3.5" />
-                      Pre-Start
-                    </Link>
-                    {item.status === 'available' && (
-                      <button onClick={() => handleCheckout(item)} disabled={actionLoading === item.id}
-                        className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-primary/15 text-primary text-xs font-semibold transition-all active:scale-95 disabled:opacity-60">
-                        <ArrowLeftRight className="w-3.5 h-3.5" />
-                        Check Out
-                      </button>
-                    )}
-                    {item.status === 'checked_out' && isMyCheckout && (
-                      <button onClick={() => handleReturn(item)} disabled={actionLoading === item.id}
-                        className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-green-500/15 text-green-400 text-xs font-semibold transition-all active:scale-95 disabled:opacity-60">
-                        <CheckCircle className="w-3.5 h-3.5" />
-                        Return
-                      </button>
-                    )}
-                    {isAdmin && (
-                      <>
-                        <button
-                          onClick={() => openPhotoPicker(item)}
-                          disabled={isPhotoBusy}
-                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-secondary text-muted-foreground text-xs font-semibold transition-all active:scale-95 disabled:opacity-60"
-                        >
-                          <Camera className="w-3.5 h-3.5" />
-                          {item.photo_path ? 'Change Photo' : 'Add Photo'}
-                        </button>
-                        {item.photo_path && (
-                          <button
-                            onClick={() => handleClearPhoto(item)}
-                            disabled={isPhotoBusy}
-                            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-secondary text-muted-foreground text-xs font-semibold transition-all active:scale-95 disabled:opacity-60"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                            Remove Photo
-                          </button>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>}
+      {selectedEquipmentId && <EquipmentDetail state={visibleDetailState} item={visibleDetail} onClose={() => setSelectedEquipmentId(null)} />}
     </div>
   );
 }
+
+const TabButton = ({ active, onClick, icon: Icon, label }) => (
+  <button type="button" role="tab" aria-selected={active} onClick={onClick} className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-bold ${active ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground'}`}>
+    <Icon className="h-4 w-4" aria-hidden="true" />{label}
+  </button>
+);
+
+const RegisterContent = ({ state, items, hasUnfilteredItems, onSelect }) => {
+  if (state === 'loading') return <LoadingCards label="Loading equipment register" />;
+  if (state === 'unavailable') return <Notice icon={ShieldCheck} title="Equipment register unavailable" message="Sign in and select an authorised company workspace before viewing its equipment." />;
+  if (state === 'denied') return <Notice alert icon={ShieldCheck} title="Equipment access denied" message="Your current company role does not permit this register request." />;
+  if (state === 'error') return <Notice alert icon={AlertTriangle} title="Equipment register unavailable" message="The register could not be loaded. No previous-company records are displayed." />;
+  if (state === 'empty') return <Notice icon={Package} title="No active equipment found" message="The authorised company register returned no current equipment." />;
+  if (items.length === 0 && hasUnfilteredItems) return <Notice icon={Search} title="No matching equipment" message="Try a different name, equipment ID or status filter." />;
+
+  return (
+    <section className="mt-5 grid gap-4 md:grid-cols-2" aria-label="Company equipment register">
+      {items.map(item => (
+        <button type="button" key={item.id} onClick={() => onSelect(item)} className="rounded-3xl border border-border bg-card p-5 text-left transition-colors hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+          <div className="flex items-start gap-4">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary"><Wrench className="h-6 w-6" aria-hidden="true" /></span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0"><h2 className="truncate text-lg font-black">{item.name}</h2><p className="mt-1 truncate text-sm text-muted-foreground">{item.equipment_id}</p></div>
+                <ChevronRight className="mt-1 h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true" />
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${statusStyles[item.status]}`}>{equipmentStatusLabel(item.status)}</span>
+                <span className="rounded-full border border-border bg-secondary px-2.5 py-1 text-xs font-semibold text-muted-foreground">{equipmentCategoryLabel(item.category)}</span>
+              </div>
+            </div>
+          </div>
+        </button>
+      ))}
+    </section>
+  );
+};
+
+const HistoryContent = ({ state, items, hasMore, role }) => {
+  if (state === 'loading') return <LoadingCards label="Loading equipment history" />;
+  if (state === 'unavailable') return <Notice icon={ShieldCheck} title="Equipment history unavailable" message="Sign in and select an authorised company workspace before viewing its history." />;
+  if (state === 'denied') return <Notice alert icon={ShieldCheck} title="Equipment history denied" message="Your current company role does not permit this history request." />;
+  if (state === 'error') return <Notice alert icon={AlertTriangle} title="Equipment history unavailable" message="Movement history could not be loaded. No previous-company records are displayed." />;
+  if (state === 'empty') return <Notice icon={History} title="No equipment movements found" message="No visible equipment movement records were returned for this workspace." />;
+
+  return (
+    <section className="mt-5" aria-label="Equipment movement history">
+      <p className="mb-4 text-sm text-muted-foreground">{role === 'worker' ? 'Your newest equipment movements.' : 'The company’s newest equipment movements.'}</p>
+      <div className="space-y-3">
+        {items.map(item => (
+          <article key={item.id} className="rounded-3xl border border-border bg-card p-5">
+            <div className="flex items-start gap-4">
+              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary"><Clock3 className="h-5 w-5" aria-hidden="true" /></span>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div><h2 className="font-black">{item.equipment_name || 'Equipment name unavailable'}</h2><p className="mt-1 text-xs font-bold uppercase tracking-[0.14em] text-primary">{equipmentHistoryActionLabel(item.action)}</p></div>
+                  <time className="text-xs text-muted-foreground" dateTime={item.timestamp}>{formatTimestamp(item.timestamp)}</time>
+                </div>
+                <p className="mt-3 flex items-center gap-2 text-sm text-muted-foreground"><UserRound className="h-4 w-4 shrink-0" aria-hidden="true" />{item.worker_name || 'Worker unavailable'}</p>
+                {item.notes && <p className="mt-3 border-t border-border pt-3 text-sm text-muted-foreground">{item.notes}</p>}
+              </div>
+            </div>
+          </article>
+        ))}
+      </div>
+      {hasMore && <p className="mt-4 text-center text-xs text-muted-foreground">Showing the newest 25 movements.</p>}
+    </section>
+  );
+};
+
+const EquipmentDetail = ({ state, item, onClose }) => (
+  <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-0 sm:items-center sm:p-6" role="dialog" aria-modal="true" aria-label="Equipment details" onClick={onClose}>
+    <section className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-t-3xl border border-border bg-card p-6 sm:rounded-3xl" onClick={event => event.stopPropagation()}>
+      <div className="flex items-center justify-between gap-4">
+        <div><p className="text-xs font-bold uppercase tracking-[0.16em] text-primary">Read-only details</p><h2 className="mt-1 text-2xl font-black">{item?.name || 'Equipment'}</h2></div>
+        <button type="button" onClick={onClose} aria-label="Close equipment details" className="flex h-10 w-10 items-center justify-center rounded-xl bg-secondary text-muted-foreground"><X className="h-5 w-5" aria-hidden="true" /></button>
+      </div>
+      {state === 'loading' ? (
+        <div className="mt-6 h-48 animate-pulse rounded-2xl bg-secondary" aria-label="Loading equipment details" />
+      ) : state !== 'ready' || !item ? (
+        <div className="mt-6 rounded-2xl border border-amber-400/20 bg-amber-400/5 p-5" role="alert"><p className="font-bold">Equipment details unavailable</p><p className="mt-1 text-sm text-muted-foreground">The item is not available in the active company register.</p></div>
+      ) : (
+        <dl className="mt-6 grid gap-4 sm:grid-cols-2">
+          <DetailField label="Equipment ID" value={item.equipment_id} />
+          <DetailField label="Category" value={equipmentCategoryLabel(item.category)} />
+          <DetailField label="Status" value={equipmentStatusLabel(item.status)} />
+          <DetailField label="Pre-start required" value={item.requires_pre_start ? 'Yes' : 'No'} />
+          <DetailField label="Held by" value={item.checked_out_by_name || 'Not checked out'} />
+          <DetailField label="Checked out at" value={formatTimestamp(item.checked_out_at)} />
+          <DetailField label="Notes" value={item.notes || 'No notes recorded'} wide />
+        </dl>
+      )}
+    </section>
+  </div>
+);
+
+const DetailField = ({ label, value, wide = false }) => <div className={`rounded-2xl bg-secondary p-4 ${wide ? 'sm:col-span-2' : ''}`}><dt className="text-xs font-bold uppercase tracking-[0.14em] text-muted-foreground">{label}</dt><dd className="mt-2 break-words text-sm font-semibold">{value}</dd></div>;
+const LoadingCards = ({ label }) => <section className="mt-5 grid gap-4 md:grid-cols-2" aria-label={label} aria-busy="true">{Array.from({ length: 4 }, (_, index) => <div key={index} className="h-36 animate-pulse rounded-3xl border border-border bg-card" />)}</section>;
+const Notice = ({ icon: Icon, title, message, alert = false }) => <section className={`mt-5 rounded-3xl border bg-card p-8 text-center ${alert ? 'border-amber-400/20' : 'border-border'}`} role={alert ? 'alert' : 'status'}><Icon className={`mx-auto h-9 w-9 ${alert ? 'text-amber-400' : 'text-primary'}`} aria-hidden="true" /><h2 className="mt-4 text-xl font-black">{title}</h2><p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-muted-foreground">{message}</p></section>;

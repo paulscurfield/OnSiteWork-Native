@@ -1,6 +1,7 @@
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { Briefcase, CalendarDays, Clock, Home, MessageSquare, User, Wrench } from 'lucide-react';
 import ModuleIcon from '@/components/navigation/ModuleIcon';
+import { useCompany } from '@/lib/companyContext';
 import { DASHBOARD_MODULES } from '@/navigation/dashboard-modules';
 
 const mobileNavItems = [
@@ -19,6 +20,35 @@ const isModuleActive = (pathname, module) => (
 
 export default function Layout() {
   const location = useLocation();
+  const { company, workspaces, switchingWorkspaceId, switchWorkspace } = useCompany();
+  const hasWorkspaceChoice = workspaces.length > 1;
+
+  const handleWorkspaceChange = event => {
+    if (event.target.value === company?.id) return;
+    switchWorkspace(event.target.value).catch(() => undefined);
+  };
+
+  const workspaceControl = hasWorkspaceChoice ? (
+    <label className="block min-w-0">
+      <span className="block text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-600">Active workspace</span>
+      <select
+        value={company?.id || ''}
+        disabled={Boolean(switchingWorkspaceId)}
+        onChange={handleWorkspaceChange}
+        className="mt-1 min-h-11 w-full rounded-xl border border-white/10 bg-[#111512] px-3 text-sm font-semibold text-white outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:opacity-60"
+        aria-label="Active company workspace"
+      >
+        {workspaces.map(workspace => (
+          <option key={workspace.companyId} value={workspace.companyId}>{workspace.companyName}</option>
+        ))}
+      </select>
+    </label>
+  ) : (
+    <div className="min-w-0">
+      <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-600">Active workspace</p>
+      <p className="mt-1 truncate text-sm font-semibold text-zinc-300">{company?.name || 'Company access required'}</p>
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-background">
@@ -59,12 +89,15 @@ export default function Layout() {
           })}
         </nav>
 
-        <div className="border-t border-white/10 p-5 text-xs leading-5 text-zinc-600">
-          Administration workspace<br />Company access required
+        <div className="border-t border-white/10 p-5">
+          {workspaceControl}
         </div>
       </aside>
 
       <main className="min-h-screen pb-20 lg:pl-72 lg:pb-0">
+        <div className="border-b border-white/10 bg-[#090c0a] px-4 py-3 lg:hidden">
+          {workspaceControl}
+        </div>
         <Outlet />
       </main>
 

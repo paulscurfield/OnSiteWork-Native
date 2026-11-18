@@ -1,17 +1,19 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { onsiteApi } from '@/api/supabase/adapter';
+import { normalizeWorkspaceCompanyId } from '@/api/supabase/workspace-adapter';
 import { useAuth } from '@/lib/AuthContext';
+import {
+  COMPANY_STATUS,
+  createLatestRequestGuard,
+  createLoadingWorkspaceState,
+  createUnauthenticatedWorkspaceState,
+  createWorkspaceSwitchQueue,
+  getVisibleWorkspaceState,
+  resolveWorkspaceSnapshot,
+} from '@/lib/workspace-state';
 
 const CompanyContext = createContext(null);
-
-const COMPANY_STATUS = {
-  LOADING: 'loading',
-  READY: 'ready',
-  UNAUTHENTICATED: 'unauthenticated',
-  NO_MEMBERSHIP: 'no_company_membership',
-  MULTIPLE_MEMBERSHIPS: 'multiple_company_memberships',
-  ERROR: 'error',
-};
 
 const companyErrorMessage = (error) => error?.message || 'Company access could not be resolved.';
 const JWT_TIMING_RETRY_DELAY_MS = 750;
@@ -27,10 +29,7 @@ const withJwtTimingRetry = async (operation) => {
   try {
     return await operation();
   } catch (error) {
-    if (!isTransientJwtTimingError(error)) {
-      throw error;
-    }
-
+    if (!isTransientJwtTimingError(error)) throw error;
     await delay(JWT_TIMING_RETRY_DELAY_MS);
     return operation();
   }
@@ -38,114 +37,178 @@ const withJwtTimingRetry = async (operation) => {
 
 export function CompanyProvider({ children }) {
   const { user, isAuthenticated, isLoadingAuth } = useAuth();
-  const [company, setCompany] = useState(null);
-  const [membership, setMembership] = useState(null);
-  const [loadingCompany, setLoadingCompany] = useState(true);
-  const [companyError, setCompanyError] = useState(null);
-  const [companyStatus, setCompanyStatus] = useState(COMPANY_STATUS.LOADING);
+  const queryClient = useQueryClient();
+  const [workspaceState, setWorkspaceState] = useState(createLoadingWorkspaceState);
+  const [switchingWorkspaceId, setSwitchingWorkspaceId] = useState(null);
 
   const mountedRef = useRef(false);
-  const requestIdRef = useRef(0);
+  const authUserIdRef = useRef(null);
+  const requestGuardRef = useRef(createLatestRequestGuard());
+  const switchQueueRef = useRef(createWorkspaceSwitchQueue());
 
-  const clearCompany = useCallback((status, error = null) => {
-    setCompany(null);
-    setMembership(null);
-    setCompanyStatus(status);
-    setCompanyError(error);
-    setLoadingCompany(false);
-  }, []);
+  const currentUserId = isAuthenticated && user?.id ? user.id : null;
+  authUserIdRef.current = currentUserId;
 
-  const loadCompany = useCallback(async () => {
-    const requestId = ++requestIdRef.current;
-
-    if (isLoadingAuth) {
-      setLoadingCompany(true);
-      setCompanyStatus(COMPANY_STATUS.LOADING);
-      return;
-    }
-
-    if (!isAuthenticated || !user?.id) {
-      clearCompany(COMPANY_STATUS.UNAUTHENTICATED);
-      return;
-    }
-
-    setLoadingCompany(true);
-    setCompany(null);
-    setMembership(null);
-    setCompanyError(null);
-    setCompanyStatus(COMPANY_STATUS.LOADING);
-
+  const loadWorkspaceSnapshot = useCallback(async ({ requestId, expectedUserId }) => {
     try {
-      const memberships = await withJwtTimingRetry(() =>
-        onsiteApi.tables.companyMembers.filter({ user_id: user.id })
-      );
-      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      const [workspaces, activeWorkspace] = await withJwtTimingRetry(() => Promise.all([
+        onsiteApi.workspaces.list(),
+        onsiteApi.workspaces.getActive(),
+      ]));
 
-      if (memberships.length === 0) {
-        clearCompany(COMPANY_STATUS.NO_MEMBERSHIP);
-        return;
-      }
+      if (
+        !mountedRef.current ||
+        !requestGuardRef.current.isCurrent(requestId) ||
+        authUserIdRef.current !== expectedUserId
+      ) return null;
 
-      if (memberships.length > 1) {
-        clearCompany(
-          COMPANY_STATUS.MULTIPLE_MEMBERSHIPS,
-          'Multiple company memberships were found. Company selection is required before continuing.'
-        );
-        return;
-      }
-
-      const resolvedMembership = memberships[0];
-      const companies = await withJwtTimingRetry(() =>
-        onsiteApi.tables.companies.filter({ id: resolvedMembership.company_id })
-      );
-      if (!mountedRef.current || requestId !== requestIdRef.current) return;
-
-      if (companies.length !== 1) {
-        clearCompany(COMPANY_STATUS.ERROR, 'Company access could not be resolved.');
-        return;
-      }
-
-      setCompany(companies[0]);
-      setMembership(resolvedMembership);
-      setCompanyError(null);
-      setCompanyStatus(COMPANY_STATUS.READY);
-      setLoadingCompany(false);
+      const nextState = resolveWorkspaceSnapshot({ workspaces, activeWorkspace, userId: expectedUserId });
+      setWorkspaceState(nextState);
+      setSwitchingWorkspaceId(null);
+      return nextState;
     } catch (error) {
-      console.error('Failed to load Supabase company:', error);
-      if (!mountedRef.current || requestId !== requestIdRef.current) return;
-      clearCompany(COMPANY_STATUS.ERROR, companyErrorMessage(error));
+      if (
+        !mountedRef.current ||
+        !requestGuardRef.current.isCurrent(requestId) ||
+        authUserIdRef.current !== expectedUserId
+      ) return null;
+
+      console.error('Failed to load Supabase workspace:', error);
+      setWorkspaceState({
+        ...createLoadingWorkspaceState(),
+        status: COMPANY_STATUS.ERROR,
+        error: companyErrorMessage(error),
+        resolvedUserId: expectedUserId,
+      });
+      setSwitchingWorkspaceId(null);
+      return null;
     }
-  }, [clearCompany, isAuthenticated, isLoadingAuth, user?.id]);
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
-    loadCompany();
-
     return () => {
       mountedRef.current = false;
-      requestIdRef.current += 1;
+      requestGuardRef.current.invalidate();
     };
-  }, [loadCompany]);
+  }, []);
 
-  const refreshCompany = useCallback(() => loadCompany(), [loadCompany]);
+  useEffect(() => {
+    const requestId = requestGuardRef.current.begin();
+    setSwitchingWorkspaceId(null);
+    queryClient.clear();
 
-  return (
-    <CompanyContext.Provider
-      value={{
-        company,
-        membership,
-        loadingCompany,
-        companyError,
-        companyStatus,
-        refreshCompany,
-        setCompany,
-      }}
-    >
-      {children}
-    </CompanyContext.Provider>
-  );
+    if (isLoadingAuth) {
+      setWorkspaceState(createLoadingWorkspaceState());
+      return;
+    }
+
+    if (!currentUserId) {
+      setWorkspaceState(createUnauthenticatedWorkspaceState());
+      return;
+    }
+
+    setWorkspaceState(createLoadingWorkspaceState());
+    loadWorkspaceSnapshot({ requestId, expectedUserId: currentUserId });
+  }, [currentUserId, isLoadingAuth, loadWorkspaceSnapshot, queryClient]);
+
+  const refreshCompany = useCallback(async () => {
+    const expectedUserId = authUserIdRef.current;
+    const requestId = requestGuardRef.current.begin();
+    queryClient.clear();
+    setSwitchingWorkspaceId(null);
+
+    if (!expectedUserId) {
+      setWorkspaceState(createUnauthenticatedWorkspaceState());
+      return null;
+    }
+
+    setWorkspaceState(createLoadingWorkspaceState());
+    return loadWorkspaceSnapshot({ requestId, expectedUserId });
+  }, [loadWorkspaceSnapshot, queryClient]);
+
+  const switchWorkspace = useCallback(async (companyId) => {
+    const expectedUserId = authUserIdRef.current;
+    if (!expectedUserId) throw new Error('Authentication required');
+
+    const normalizedCompanyId = normalizeWorkspaceCompanyId(companyId);
+    const authorisedWorkspace = workspaceState.workspaces.find(
+      workspace => workspace.companyId === normalizedCompanyId
+    );
+    if (!authorisedWorkspace) {
+      throw new Error('The requested workspace is not in the authorised workspace list');
+    }
+
+    const requestId = requestGuardRef.current.begin();
+    setSwitchingWorkspaceId(normalizedCompanyId);
+    setWorkspaceState(current => ({
+      ...createLoadingWorkspaceState(),
+      workspaces: current.workspaces,
+    }));
+    queryClient.clear();
+
+    try {
+      await switchQueueRef.current.enqueue(async () => {
+        if (authUserIdRef.current !== expectedUserId) {
+          throw new Error('Authentication changed before workspace selection completed');
+        }
+        return withJwtTimingRetry(() => onsiteApi.workspaces.setActive(normalizedCompanyId));
+      });
+
+      if (
+        !mountedRef.current ||
+        !requestGuardRef.current.isCurrent(requestId) ||
+        authUserIdRef.current !== expectedUserId
+      ) return null;
+
+      const nextState = await loadWorkspaceSnapshot({ requestId, expectedUserId });
+      if (nextState?.company?.id !== normalizedCompanyId) {
+        throw new Error('The selected workspace could not be confirmed');
+      }
+      return nextState;
+    } catch (error) {
+      if (
+        mountedRef.current &&
+        requestGuardRef.current.isCurrent(requestId) &&
+        authUserIdRef.current === expectedUserId
+      ) {
+        console.error('Failed to switch Supabase workspace:', error);
+        setWorkspaceState({
+          ...createLoadingWorkspaceState(),
+          status: COMPANY_STATUS.ERROR,
+          error: companyErrorMessage(error),
+          resolvedUserId: expectedUserId,
+        });
+        setSwitchingWorkspaceId(null);
+      }
+      throw error;
+    }
+  }, [loadWorkspaceSnapshot, queryClient, workspaceState.workspaces]);
+
+  const visibleState = getVisibleWorkspaceState({
+    state: workspaceState,
+    userId: currentUserId,
+    isAuthenticated,
+    isLoadingAuth,
+  });
+
+  const value = useMemo(() => ({
+    company: visibleState.company,
+    membership: visibleState.membership,
+    workspaces: visibleState.workspaces,
+    loadingCompany: visibleState.status === COMPANY_STATUS.LOADING,
+    companyError: visibleState.error,
+    companyStatus: visibleState.status,
+    switchingWorkspaceId,
+    refreshCompany,
+    switchWorkspace,
+  }), [refreshCompany, switchingWorkspaceId, switchWorkspace, visibleState]);
+
+  return <CompanyContext.Provider value={value}>{children}</CompanyContext.Provider>;
 }
 
 export function useCompany() {
-  return useContext(CompanyContext);
+  const context = useContext(CompanyContext);
+  if (!context) throw new Error('useCompany must be used within a CompanyProvider');
+  return context;
 }

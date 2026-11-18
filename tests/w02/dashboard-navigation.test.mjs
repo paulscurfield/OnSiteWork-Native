@@ -100,7 +100,9 @@ test('application routes support selectors, selected-job deep links, refresh and
 
 test('shared Jobs page performs company-scoped loading and renders module selection links', () => {
   const source = readSource('src/pages/Jobs.jsx');
-  assert.match(source, /company_id: resolvedSupabaseCompany\.id/);
+  assert.match(source, /resolveJobReadScope/);
+  assert.match(source, /onsiteApi\.jobs\.list\(jobScope\.companyId\)/);
+  assert.equal(source.includes('tables.companies.list'), false);
   assert.match(source, /getJobFirstModule\(moduleKey\)/);
   assert.match(source, /getJobRecordsPath\(jobModule\.key, job\.id\)/);
   assert.match(source, /setJobs\(\[\]\)/);
@@ -135,12 +137,12 @@ test('job status labels format on_hold without changing status identifiers or na
 
 test('record shells disclose incomplete integration and do not persist cached records', () => {
   const source = readSource('src/pages/JobModuleRecords.jsx');
-  assert.match(source, /Backend connection unavailable/);
-  assert.match(source, /No records have been requested, cached or fabricated/);
-  assert.match(source, /A route identifier is not treated as authorisation/);
+  assert.match(source, /onsiteApi\.jobs\.get\(jobScope\.companyId, normalizedJobId\)/);
+  assert.match(source, /Module integration pending/);
+  assert.match(source, /no module records have been requested, cached or fabricated/);
+  assert.match(source, /The backend remains the authorization boundary/);
   assert.equal(source.includes('localStorage'), false);
   assert.equal(source.includes('sessionStorage'), false);
-  assert.equal(source.includes('onsiteApi'), false);
 });
 
 test('dashboard keeps clock status mobile-only and provides responsive, keyboard-focusable tiles', () => {
@@ -159,10 +161,13 @@ test('dashboard keeps clock status mobile-only and provides responsive, keyboard
   assert.match(layout, /aria-label="Administration modules"/);
 });
 
-test('Team shell does not expose administration controls to worker roles', () => {
+test('Team directory remains read-only and uses the active company RPC adapter', () => {
   const source = readSource('src/pages/Team.jsx');
-  assert.match(source, /membership\?\.role === 'owner'/);
-  assert.match(source, /membership\?\.role === 'admin'/);
-  assert.match(source, /restricted to company owners and admins/);
+  assert.match(source, /onsiteApi\.teamDirectory\.list\(teamScope\.companyId\)/);
+  assert.match(source, /resolveTeamReadScope/);
+  assert.match(source, /Company team directory/);
+  assert.equal(source.includes('canAdministerTeam'), false);
+  assert.equal(source.includes('Invite'), false);
+  assert.equal(source.includes('Delete'), false);
   assert.equal(source.includes('supervisor'), false);
 });

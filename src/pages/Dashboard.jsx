@@ -8,15 +8,6 @@ import ModuleIcon from '@/components/navigation/ModuleIcon';
 import { useCompany } from '@/lib/companyContext';
 import { DASHBOARD_MODULES } from '@/navigation/dashboard-modules';
 
-const resolveSupabaseCompany = (profile, companyRows) => {
-  if (!profile?.id) throw new Error('Not authenticated with Supabase');
-  if (companyRows.length === 0) throw new Error('No Supabase company found for this user');
-  if (companyRows.length > 1) {
-    throw new Error('Multiple Supabase companies found. A company selector is required before Dashboard can load safely.');
-  }
-  return companyRows[0];
-};
-
 const BrandMark = () => (
   <div className="flex items-center gap-3" aria-label="On-Site Work">
     <div className="relative flex h-12 w-12 items-center justify-center rounded-2xl border border-emerald-400/30 bg-emerald-400/10">
@@ -107,14 +98,7 @@ export default function Dashboard() {
     if (company) {
       const loadActiveEntry = async () => {
         try {
-          const [profile, companyRows] = await Promise.all([
-            onsiteApi.auth.me(),
-            onsiteApi.tables.companies.list('name'),
-          ]);
-          if (requestId !== requestIdRef.current) return;
-
-          const resolvedCompany = resolveSupabaseCompany(profile, companyRows);
-          const activeTimeEntry = await onsiteApi.tables.timeEntries.getMyActive(resolvedCompany.id);
+          const activeTimeEntry = await onsiteApi.tables.timeEntries.getMyActive(company.id);
           if (requestId === requestIdRef.current) setActiveEntry(activeTimeEntry);
         } catch (error) {
           if (requestId === requestIdRef.current) {

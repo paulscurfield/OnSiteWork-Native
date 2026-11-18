@@ -1,13 +1,18 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, ArrowLeft, BriefcaseBusiness, DatabaseZap } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
+import { onsiteApi } from '@/api/supabase/adapter';
 import ModuleIcon from '@/components/navigation/ModuleIcon';
+import { useAuth } from '@/lib/AuthContext';
 import { useCompany } from '@/lib/companyContext';
+import { createJobScopeKey, resolveJobReadScope } from '@/lib/job-access';
 import {
   createWorkspaceJobContextKey,
   getJobFirstModule,
   getJobSelectorPath,
   isValidJobIdentifier,
 } from '@/navigation/dashboard-modules';
+import { formatJobStatusLabel } from '@/pages/job-status';
 
 const InvalidRoute = ({ message, moduleKey }) => {
   const module = getJobFirstModule(moduleKey);
@@ -29,21 +34,89 @@ const InvalidRoute = ({ message, moduleKey }) => {
   );
 };
 
+const LoadingJob = () => (
+  <div className="flex min-h-[70vh] items-center justify-center px-6">
+    <div className="flex items-center gap-3 text-sm font-semibold text-muted-foreground" role="status">
+      <span className="h-5 w-5 animate-spin rounded-full border-2 border-primary/30 border-t-primary" aria-hidden="true" />
+      Verifying job access…
+    </div>
+  </div>
+);
+
 export default function JobModuleRecords() {
-  const { company } = useCompany();
+  const { user } = useAuth();
+  const { company, membership } = useCompany();
   const { jobId, moduleKey } = useParams();
   const module = getJobFirstModule(moduleKey);
+  const requestIdRef = useRef(0);
+  const [job, setJob] = useState(null);
+  const [jobState, setJobState] = useState('loading');
+  const [verifiedRequestKey, setVerifiedRequestKey] = useState(null);
+
+  const jobScope = useMemo(() => resolveJobReadScope({
+    userId: user?.id,
+    company,
+    membership,
+  }), [company, membership, user?.id]);
+  const scopeKey = createJobScopeKey(jobScope);
+  const normalizedJobId = isValidJobIdentifier(jobId) ? jobId.trim().toLowerCase() : null;
+  const requestKey = scopeKey && module && normalizedJobId
+    ? `${scopeKey}:${module.key}:${normalizedJobId}`
+    : null;
+  const hasCurrentVerification = Boolean(requestKey) && verifiedRequestKey === requestKey;
+  const visibleJob = hasCurrentVerification ? job : null;
+  const visibleJobState = requestKey && !hasCurrentVerification ? 'loading' : jobState;
+
+  useEffect(() => {
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    setJob(null);
+    setVerifiedRequestKey(null);
+
+    if (!module || !normalizedJobId || !jobScope || !requestKey) {
+      setJobState('unavailable');
+      return;
+    }
+
+    setJobState('loading');
+    onsiteApi.jobs.get(jobScope.companyId, normalizedJobId)
+      .then(result => {
+        if (requestId !== requestIdRef.current) return;
+        if (!result) {
+          setVerifiedRequestKey(requestKey);
+          setJobState('unavailable');
+          return;
+        }
+        setJob(result);
+        setVerifiedRequestKey(requestKey);
+        setJobState('ready');
+      })
+      .catch(error => {
+        if (requestId !== requestIdRef.current) return;
+        console.error('Failed to verify Supabase job context:', error);
+        setVerifiedRequestKey(requestKey);
+        setJobState('unavailable');
+      });
+
+    return () => {
+      requestIdRef.current += 1;
+    };
+  }, [jobScope, module, normalizedJobId, requestKey]);
 
   if (!module) {
     return <InvalidRoute message="This module is not part of the approved job-first workspace." moduleKey={moduleKey} />;
   }
-  if (!isValidJobIdentifier(jobId)) {
+  if (!normalizedJobId) {
     return <InvalidRoute message="The URL does not contain a valid job identifier. Choose the job again from the company-scoped list." moduleKey={moduleKey} />;
   }
+  if (visibleJobState === 'loading') return <LoadingJob />;
+  if (visibleJobState !== 'ready' || !visibleJob || !jobScope) {
+    return <InvalidRoute message="The requested job is unavailable in the active workspace." moduleKey={moduleKey} />;
+  }
 
-  const contextKey = createWorkspaceJobContextKey(company?.id, moduleKey, jobId);
+  const contextKey = createWorkspaceJobContextKey(jobScope.companyId, moduleKey, visibleJob.id);
   if (!contextKey) {
-    return <InvalidRoute message="The active company and job context could not be established safely." moduleKey={moduleKey} />;
+    return <InvalidRoute message="The requested job is unavailable in the active workspace." moduleKey={moduleKey} />;
   }
 
   return (
@@ -65,7 +138,9 @@ export default function JobModuleRecords() {
             <div className="min-w-0 flex-1">
               <p className="text-xs font-bold uppercase tracking-[0.18em] text-primary">Job workspace</p>
               <h1 className="mt-1 text-3xl font-black tracking-tight">{module.label}</h1>
-              <p className="mt-2 truncate text-sm text-muted-foreground">{company.name}</p>
+              <p className="mt-2 truncate text-sm text-muted-foreground">
+                {visibleJob.job_name} · {jobScope.companyName}
+              </p>
             </div>
           </div>
         </header>
@@ -73,13 +148,13 @@ export default function JobModuleRecords() {
         <section className="mt-5 grid gap-4 md:grid-cols-[minmax(0,1fr)_18rem]" aria-label={`${module.label} job status`}>
           <div className="rounded-3xl border border-border bg-card p-6 sm:p-8">
             <DatabaseZap className="h-8 w-8 text-primary" aria-hidden="true" />
-            <h2 className="mt-5 text-xl font-black">Backend connection unavailable</h2>
+            <h2 className="mt-5 text-xl font-black">Module integration pending</h2>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-              {module.label} records for this job are not connected during W02-A. No records have been requested, cached or fabricated on this page.
+              Job access has been verified for {visibleJob.job_name}. {module.label} records are not connected during W03-C, so no module records have been requested, cached or fabricated.
             </p>
             <div className="mt-6 rounded-2xl border border-dashed border-border bg-secondary/40 p-5">
-              <p className="text-sm font-bold">No records to display offline</p>
-              <p className="mt-1 text-xs leading-5 text-muted-foreground">Secure company and job validation will be completed through the approved backend contract in a later checkpoint.</p>
+              <p className="text-sm font-bold">No module records to display</p>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">The selected job is authorised; the module workflow remains deliberately unavailable until its own approved integration checkpoint.</p>
             </div>
           </div>
 
@@ -88,8 +163,10 @@ export default function JobModuleRecords() {
               <BriefcaseBusiness className="h-5 w-5 text-primary" aria-hidden="true" />
               <h2 className="font-black">Selected job</h2>
             </div>
-            <p className="mt-4 break-all rounded-xl bg-secondary p-3 font-mono text-xs text-muted-foreground">{jobId.toLowerCase()}</p>
-            <p className="mt-3 text-xs leading-5 text-muted-foreground">A route identifier is not treated as authorisation. The backend must independently verify company and job access.</p>
+            <p className="mt-4 font-bold text-foreground">{visibleJob.job_name}</p>
+            <p className="mt-1 text-xs font-mono text-muted-foreground">#{visibleJob.job_number}</p>
+            <p className="mt-3 text-xs font-semibold text-muted-foreground">{formatJobStatusLabel(visibleJob.status)}</p>
+            <p className="mt-3 text-xs leading-5 text-muted-foreground">This context was loaded using both the active company and job identifier. The backend remains the authorization boundary.</p>
           </aside>
         </section>
       </div>

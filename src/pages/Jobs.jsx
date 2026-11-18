@@ -1,9 +1,11 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { onsiteApi } from '@/api/supabase/adapter';
+import { useAuth } from '@/lib/AuthContext';
 import { useCompany } from '@/lib/companyContext';
+import { canManageJobs, createJobScopeKey, resolveJobReadScope } from '@/lib/job-access';
 import { Link, useParams } from 'react-router-dom';
-import { AlertTriangle, Briefcase, MapPin, ChevronLeft, ChevronRight, Search, Trash2, Pencil, X, Navigation, Plus, Check } from 'lucide-react';
+import { AlertTriangle, Briefcase, MapPin, ChevronLeft, ChevronRight, Search, Pencil, X, Navigation, Plus, Check } from 'lucide-react';
 import { toast } from 'sonner';
 import { getJobFirstModule, getJobRecordsPath, isValidJobIdentifier } from '@/navigation/dashboard-modules';
 import { formatJobStatusLabel } from '@/pages/job-status';
@@ -12,21 +14,6 @@ const statusColors = {
   active: 'bg-green-500/20 text-green-400 border-green-500/30',
   completed: 'bg-muted text-muted-foreground border-border',
   on_hold: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
-};
-
-const resolveSupabaseCompany = (profile, companyRows) => {
-  if (!profile?.id) {
-    throw new Error('Not authenticated with Supabase');
-  }
-
-  if (companyRows.length === 0) {
-    throw new Error('No Supabase company found for this user');
-  }
-  if (companyRows.length > 1) {
-    throw new Error('Multiple Supabase companies found. A company selector is required before Jobs can load safely.');
-  }
-
-  return companyRows[0];
 };
 
 /**
@@ -40,13 +27,14 @@ const resolveSupabaseCompany = (profile, companyRows) => {
  */
 
 export default function Jobs() {
-  const { company } = useCompany();
+  const { user } = useAuth();
+  const { company, membership } = useCompany();
   const { moduleKey } = useParams();
   const jobModule = moduleKey ? getJobFirstModule(moduleKey) : null;
   const invalidModule = Boolean(moduleKey && !jobModule);
   const requestIdRef = useRef(0);
-  const [supabaseCompany, setSupabaseCompany] = useState(null);
   const [jobs, setJobs] = useState([]);
+  const [loadedScopeKey, setLoadedScopeKey] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [search, setSearch] = useState('');
@@ -56,13 +44,23 @@ export default function Jobs() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [addForm, setAddForm] = useState({ job_name: '', job_number: '', location_address: '', notes: '' });
   const [addSaving, setAddSaving] = useState(false);
-  const [deleteSavingId, setDeleteSavingId] = useState(null);
+  const jobScope = useMemo(() => resolveJobReadScope({
+    userId: user?.id,
+    company,
+    membership,
+  }), [company, membership, user?.id]);
+  const jobScopeKey = createJobScopeKey(jobScope);
+  const hasCurrentJobState = Boolean(jobScopeKey) && !invalidModule && loadedScopeKey === jobScopeKey;
+  const visibleJobs = hasCurrentJobState ? jobs : [];
+  const visibleLoadError = hasCurrentJobState ? loadError : '';
+  const visibleLoading = Boolean(jobScopeKey) && !invalidModule && (!hasCurrentJobState || loading);
+  const canManage = canManageJobs(jobScope) && hasCurrentJobState && !visibleLoadError;
 
   useEffect(() => {
-    if (!company || invalidModule) {
+    if (!jobScope || invalidModule) {
       requestIdRef.current += 1;
-      setSupabaseCompany(null);
       setJobs([]);
+      setLoadedScopeKey(null);
       setLoadError(invalidModule ? 'This job-first module is not available.' : '');
       setLoading(false);
       return;
@@ -70,33 +68,23 @@ export default function Jobs() {
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
     setLoading(true);
-    setSupabaseCompany(null);
     setJobs([]);
+    setLoadedScopeKey(null);
     setLoadError('');
 
     const loadJobs = async () => {
       try {
-        const [profile, companyRows] = await Promise.all([
-          onsiteApi.auth.me(),
-          onsiteApi.tables.companies.list('name'),
-        ]);
+        const data = await onsiteApi.jobs.list(jobScope.companyId);
         if (requestId !== requestIdRef.current) return;
 
-        const resolvedSupabaseCompany = resolveSupabaseCompany(profile, companyRows);
-        const data = await onsiteApi.tables.jobs.filter(
-          { company_id: resolvedSupabaseCompany.id },
-          '-created_date'
-        );
-        if (requestId !== requestIdRef.current) return;
-
-        setSupabaseCompany(resolvedSupabaseCompany);
         setJobs(data);
+        setLoadedScopeKey(jobScopeKey);
       } catch (error) {
         if (requestId === requestIdRef.current) {
           console.error('Failed to load Supabase jobs:', error);
-          setSupabaseCompany(null);
           setJobs([]);
           setLoadError(error?.message || 'Jobs are unavailable while the backend connection is offline.');
+          setLoadedScopeKey(jobScopeKey);
         }
       } finally {
         if (requestId === requestIdRef.current) {
@@ -109,23 +97,7 @@ export default function Jobs() {
     return () => {
       requestIdRef.current += 1;
     };
-  }, [company, invalidModule]);
-
-  const handleDelete = async (e, jobId) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDeleteSavingId(jobId);
-    try {
-      await onsiteApi.tables.jobs.delete(jobId);
-      setJobs(currentJobs => currentJobs.filter(j => j.id !== jobId));
-      toast.success('Job deleted');
-    } catch (error) {
-      console.error('Failed to delete Supabase job:', error);
-      toast.error('Failed to delete job');
-    } finally {
-      setDeleteSavingId(null);
-    }
-  };
+  }, [invalidModule, jobScope, jobScopeKey]);
 
   const openEdit = (e, job) => {
     e.preventDefault();
@@ -141,6 +113,7 @@ export default function Jobs() {
   };
 
   const handleEditSave = async () => {
+    if (!canManage || !editJob) return;
     setEditSaving(true);
     try {
       const updatedJob = await onsiteApi.tables.jobs.update(editJob.id, {
@@ -164,12 +137,12 @@ export default function Jobs() {
   };
 
   const handleAddJob = async () => {
+    if (!canManage || !jobScope) return;
     if (!addForm.job_name || !addForm.job_number) { toast.error('Job name and number are required'); return; }
-    if (!supabaseCompany?.id) { toast.error('Supabase company is not ready yet'); return; }
     setAddSaving(true);
     try {
       const newJob = await onsiteApi.tables.jobs.create({
-        company_id: supabaseCompany.id,
+        company_id: jobScope.companyId,
         job_name: addForm.job_name,
         job_number: addForm.job_number,
         location_address: addForm.location_address,
@@ -190,7 +163,7 @@ export default function Jobs() {
     }
   };
 
-  const filtered = jobs.filter(j =>
+  const filtered = visibleJobs.filter(j =>
     j.job_name?.toLowerCase().includes(search.toLowerCase()) ||
     j.job_number?.toLowerCase().includes(search.toLowerCase())
   );
@@ -207,7 +180,7 @@ export default function Jobs() {
           </p>
           <h1 className="truncate text-2xl font-black">{jobModule ? 'Choose a Job Site' : 'Job Sites'}</h1>
         </div>
-        {!jobModule && !invalidModule && (
+        {!jobModule && !invalidModule && canManage && (
           <button
             type="button"
             onClick={() => setShowAddModal(true)}
@@ -234,7 +207,7 @@ export default function Jobs() {
       </div>
 
       {/* Add Job Modal */}
-      {showAddModal && createPortal(
+      {canManage && showAddModal && createPortal(
         <div className="fixed inset-0 z-[9999] bg-black/60 flex items-end justify-center" onClick={() => setShowAddModal(false)}>
           <div className="bg-card border border-border rounded-t-3xl w-full max-w-lg p-6 space-y-4" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-2">
@@ -283,7 +256,7 @@ export default function Jobs() {
       )}
 
       {/* Edit Modal */}
-      {editJob && createPortal(
+      {canManage && editJob && createPortal(
         <div className="fixed inset-0 z-[9999] bg-black/60 flex items-end justify-center" onClick={() => setEditJob(null)}>
           <div className="bg-card border border-border rounded-t-3xl w-full max-w-lg p-6 space-y-4" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-2">
@@ -334,15 +307,15 @@ export default function Jobs() {
 
       {/* Job List */}
       <div className="px-6 space-y-3">
-        {loading ? (
+        {visibleLoading ? (
           Array(4).fill(0).map((_, i) => (
             <div key={i} className="h-24 rounded-2xl bg-card border border-border animate-pulse" />
           ))
-        ) : loadError ? (
+        ) : visibleLoadError ? (
           <div className="rounded-2xl border border-amber-400/20 bg-amber-400/5 px-6 py-12 text-center" role="alert">
             <AlertTriangle className="mx-auto mb-3 h-10 w-10 text-amber-400" />
             <p className="font-bold">Jobs unavailable</p>
-            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-muted-foreground">{loadError}</p>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-muted-foreground">{visibleLoadError}</p>
             <p className="mt-2 text-xs text-muted-foreground">No cached job list is displayed when company-scoped loading fails.</p>
           </div>
         ) : filtered.length === 0 ? (
@@ -407,14 +380,16 @@ export default function Jobs() {
                     </a>
                   ) : null}
                   <div className="flex-1" />
-                  <button onClick={(e) => openEdit(e, job)}
-                    className="w-8 h-8 rounded-xl bg-secondary flex items-center justify-center hover:bg-primary/20 transition-colors">
-                    <Pencil className="w-4 h-4 text-muted-foreground" />
-                  </button>
-                  <button onClick={(e) => handleDelete(e, job.id)} disabled={deleteSavingId === job.id}
-                    className="w-8 h-8 rounded-xl bg-destructive/10 flex items-center justify-center hover:bg-destructive/20 transition-colors">
-                    <Trash2 className="w-4 h-4 text-destructive" />
-                  </button>
+                  {canManage && (
+                    <button
+                      type="button"
+                      onClick={(e) => openEdit(e, job)}
+                      className="w-8 h-8 rounded-xl bg-secondary flex items-center justify-center hover:bg-primary/20 transition-colors"
+                      aria-label={`Edit ${job.job_name}`}
+                    >
+                      <Pencil className="w-4 h-4 text-muted-foreground" />
+                    </button>
+                  )}
                   <Link to={`/clockin/${job.id}`}
                     className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-bold">
                     <ChevronRight className="w-4 h-4" />

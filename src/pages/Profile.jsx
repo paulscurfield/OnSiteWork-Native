@@ -1,353 +1,233 @@
-import { useState, useEffect, useRef } from 'react';
-import { onsiteApi } from '@/api/supabase/adapter';
-import { User, Phone, Mail, Shield, Save, ChevronLeft, Camera, Loader2, LogOut } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { AlertTriangle, Building2, ChevronLeft, Mail, Phone, ShieldCheck, UserRound } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { toast } from 'sonner';
+import { onsiteApi } from '@/api/supabase/adapter';
 import { useAuth } from '@/lib/AuthContext';
+import { useCompany } from '@/lib/companyContext';
+import {
+  createProfileIdentityKey,
+  isProfilePermissionError,
+  profileRoleLabel,
+  resolveProfileWorkspace,
+} from '@/lib/profile-access';
 
-const resolveSupabaseCompany = (profile, companyRows) => {
-  if (!profile?.id) {
-    throw new Error('You must be signed in to view your profile.');
-  }
-  if (!Array.isArray(companyRows) || companyRows.length === 0) {
-    throw new Error('No Supabase company is available for this profile.');
-  }
-  if (companyRows.length > 1) {
-    throw new Error('Multiple Supabase companies are available. Profile cannot choose one safely.');
-  }
-  return companyRows[0];
+const verificationLabels = {
+  verified: 'Verified',
+  unverified: 'Not verified',
+  unknown: 'Verification unknown',
+  unavailable: 'Not provided',
+};
+
+const verificationStyles = {
+  verified: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
+  unverified: 'border-amber-500/30 bg-amber-500/10 text-amber-400',
+  unknown: 'border-border bg-secondary text-muted-foreground',
+  unavailable: 'border-border bg-secondary text-muted-foreground',
 };
 
 export default function Profile() {
-  const { logout } = useAuth();
-  const [user, setUser] = useState(null);
-  const [role, setRole] = useState(null);
-  const [avatarUrl, setAvatarUrl] = useState(null);
-  const [form, setForm] = useState({ full_name: '', phone: '' });
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [uploadingAvatar, setUploadingAvatar] = useState(false);
-  const [signingOut, setSigningOut] = useState(false);
-  const avatarInputRef = useRef(null);
-  const mountedRef = useRef(false);
-  const loadRequestIdRef = useRef(0);
+  const { user } = useAuth();
+  const { company, membership, loadingCompany, companyError } = useCompany();
+  const profileRequestIdRef = useRef(0);
   const avatarRequestIdRef = useRef(0);
-  const uploadingAvatarRef = useRef(false);
+  const [profile, setProfile] = useState(null);
+  const [profileResultKey, setProfileResultKey] = useState(null);
+  const [profileState, setProfileState] = useState('loading');
+  const [avatarUrl, setAvatarUrl] = useState(null);
+  const [avatarResultKey, setAvatarResultKey] = useState(null);
+
+  const identityKey = createProfileIdentityKey(user?.id);
+  const workspace = useMemo(() => resolveProfileWorkspace({
+    userId: identityKey,
+    company,
+    membership,
+  }), [company, identityKey, membership]);
+  const hasCurrentProfile = Boolean(identityKey) && profileResultKey === identityKey;
+  const visibleProfile = hasCurrentProfile ? profile : null;
+  const visibleProfileState = !identityKey
+    ? 'unauthenticated'
+    : hasCurrentProfile
+      ? profileState
+      : 'loading';
+  const expectedAvatarKey = identityKey && visibleProfile?.avatar_path
+    ? `${identityKey}:${visibleProfile.avatar_path}`
+    : null;
+  const visibleAvatarUrl = expectedAvatarKey && avatarResultKey === expectedAvatarKey
+    ? avatarUrl
+    : null;
 
   useEffect(() => {
-    mountedRef.current = true;
-    const requestId = loadRequestIdRef.current + 1;
-    loadRequestIdRef.current = requestId;
+    const requestId = profileRequestIdRef.current + 1;
+    profileRequestIdRef.current = requestId;
+    avatarRequestIdRef.current += 1;
+    setProfile(null);
+    setProfileResultKey(null);
+    setAvatarUrl(null);
+    setAvatarResultKey(null);
 
-    const loadProfile = async () => {
-      setLoading(true);
-      setLoadError('');
-      setUser(null);
-      setRole(null);
-      setAvatarUrl(null);
-      setForm({ full_name: '', phone: '' });
-
-      try {
-        const [profile, companies] = await Promise.all([
-          onsiteApi.auth.me(),
-          onsiteApi.tables.companies.list('name'),
-        ]);
-        if (!mountedRef.current || requestId !== loadRequestIdRef.current) return;
-
-        const company = resolveSupabaseCompany(profile, companies);
-        const memberships = await onsiteApi.tables.companyMembers.filter({
-          company_id: company.id,
-          user_id: profile.id,
-        });
-        if (!mountedRef.current || requestId !== loadRequestIdRef.current) return;
-
-        if (!Array.isArray(memberships) || memberships.length !== 1) {
-          throw new Error('Profile membership could not be resolved safely.');
-        }
-
-        setUser(profile);
-        setRole(memberships[0].role);
-        setForm({
-          full_name: profile.full_name || '',
-          phone: profile.phone || '',
-        });
-
-        const avatarPath = profile.avatar_path;
-        if (avatarPath) {
-          const avatarRequestId = avatarRequestIdRef.current + 1;
-          avatarRequestIdRef.current = avatarRequestId;
-          onsiteApi.auth.getMyAvatarSignedUrl(avatarPath)
-            .then((signedUrl) => {
-              if (
-                mountedRef.current &&
-                requestId === loadRequestIdRef.current &&
-                avatarRequestId === avatarRequestIdRef.current
-              ) {
-                setAvatarUrl(signedUrl);
-              }
-            })
-            .catch((error) => {
-              console.warn('Profile avatar preview could not be loaded', error);
-              if (
-                mountedRef.current &&
-                requestId === loadRequestIdRef.current &&
-                avatarRequestId === avatarRequestIdRef.current
-              ) {
-                setAvatarUrl(null);
-              }
-            });
-        }
-      } catch (error) {
-        console.warn('Profile could not be loaded', error);
-        if (mountedRef.current && requestId === loadRequestIdRef.current) {
-          setLoadError(error?.message || 'Profile is unavailable.');
-          setUser(null);
-          setRole(null);
-          setAvatarUrl(null);
-        }
-      } finally {
-        if (mountedRef.current && requestId === loadRequestIdRef.current) {
-          setLoading(false);
-        }
-      }
-    };
-
-    loadProfile();
-
-    return () => {
-      mountedRef.current = false;
-      loadRequestIdRef.current += 1;
-      avatarRequestIdRef.current += 1;
-    };
-  }, []);
-
-  const handleAvatarChange = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (uploadingAvatarRef.current || loading || loadError || !user) {
-      e.target.value = '';
+    if (!identityKey) {
+      setProfileState('unauthenticated');
       return;
     }
 
-    uploadingAvatarRef.current = true;
-    setUploadingAvatar(true);
-    const avatarRequestId = avatarRequestIdRef.current + 1;
-    avatarRequestIdRef.current = avatarRequestId;
-
-    try {
-      const updatedProfile = await onsiteApi.auth.replaceMyAvatar(file);
-      if (mountedRef.current) {
-        setUser(updatedProfile);
-        try {
-          const signedUrl = await onsiteApi.auth.getMyAvatarSignedUrl(updatedProfile.avatar_path);
-          if (mountedRef.current && avatarRequestId === avatarRequestIdRef.current) {
-            setAvatarUrl(signedUrl);
-            toast.success('Profile photo updated!');
-          }
-        } catch (signError) {
-          console.warn('Profile avatar preview could not be refreshed', signError);
-          if (mountedRef.current && avatarRequestId === avatarRequestIdRef.current) {
-            setAvatarUrl(null);
-            toast.success('Profile photo updated, but preview could not refresh.');
-          }
-        }
-      }
-    } catch (error) {
-      console.warn('Profile photo update failed', error);
-      if (mountedRef.current) {
-        toast.error(error?.message || 'Failed to update profile photo');
-      }
-    } finally {
-      uploadingAvatarRef.current = false;
-      if (mountedRef.current) {
-        setUploadingAvatar(false);
-      }
-      e.target.value = '';
-    }
-  };
-
-  const handleSave = async () => {
-    if (!user || loadError || saving) return;
-    setSaving(true);
-    try {
-      const updatedProfile = await onsiteApi.auth.updateMyProfile({
-        full_name: form.full_name,
-        phone: form.phone,
+    setProfileState('loading');
+    onsiteApi.profileRead.get(identityKey)
+      .then(result => {
+        if (requestId !== profileRequestIdRef.current) return;
+        setProfile(result);
+        setProfileResultKey(identityKey);
+        setProfileState(result ? 'ready' : 'missing');
+      })
+      .catch(error => {
+        if (requestId !== profileRequestIdRef.current) return;
+        console.error('Failed to load Supabase self profile:', error);
+        setProfile(null);
+        setProfileResultKey(identityKey);
+        setProfileState(isProfilePermissionError(error) ? 'denied' : 'error');
       });
-      setUser(updatedProfile);
-      setForm({
-        full_name: updatedProfile.full_name || '',
-        phone: updatedProfile.phone || '',
+
+    return () => { profileRequestIdRef.current += 1; };
+  }, [identityKey]);
+
+  useEffect(() => {
+    const requestId = avatarRequestIdRef.current + 1;
+    avatarRequestIdRef.current = requestId;
+    setAvatarUrl(null);
+    setAvatarResultKey(null);
+
+    if (!expectedAvatarKey || !visibleProfile?.avatar_path) return;
+
+    onsiteApi.auth.getMyAvatarSignedUrl(visibleProfile.avatar_path)
+      .then(signedUrl => {
+        if (requestId !== avatarRequestIdRef.current) return;
+        setAvatarUrl(signedUrl);
+        setAvatarResultKey(expectedAvatarKey);
+      })
+      .catch(error => {
+        if (requestId !== avatarRequestIdRef.current) return;
+        console.warn('Profile avatar preview could not be loaded:', error);
+        setAvatarUrl(null);
+        setAvatarResultKey(expectedAvatarKey);
       });
-      toast.success('Profile updated!');
-    } catch (e) {
-      toast.error('Failed to save. Please try again.');
-    } finally {
-      setSaving(false);
-    }
-  };
 
-  const handleSignOut = async () => {
-    if (signingOut) return;
-    setSigningOut(true);
-    try {
-      await logout();
-    } catch (error) {
-      console.warn('Sign out failed', error);
-      toast.error('Could not sign out. Please try again.');
-    } finally {
-      if (mountedRef.current) {
-        setSigningOut(false);
-      }
-    }
-  };
-
-  const roleColors = {
-    owner: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
-    admin: 'bg-rose-500/20 text-rose-400 border-rose-500/30',
-    supervisor: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
-    user: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-    worker: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-  };
-  const displayedRole = role || 'worker';
-  const profileDisabled = loading || !!loadError || !user;
+    return () => { avatarRequestIdRef.current += 1; };
+  }, [expectedAvatarKey, visibleProfile?.avatar_path]);
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="px-6 pt-14 pb-4 flex items-center gap-4">
-        <Link to="/" className="w-9 h-9 rounded-xl bg-secondary flex items-center justify-center">
-          <ChevronLeft className="w-5 h-5" />
-        </Link>
-        <h1 className="text-2xl font-black">My Profile</h1>
-      </div>
-
-      <div className="px-6">
-        {loadError && (
-          <div className="mb-4 rounded-2xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
-            {loadError}
+      <div className="mx-auto max-w-3xl px-5 pb-24 pt-10 sm:px-8 lg:pb-12 lg:pt-16">
+        <header className="flex items-center gap-4">
+          <Link to="/" aria-label="Back to dashboard" className="flex h-10 w-10 items-center justify-center rounded-xl bg-secondary text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+            <ChevronLeft className="h-5 w-5" aria-hidden="true" />
+          </Link>
+          <div>
+            <p className="text-xs font-bold uppercase tracking-[0.18em] text-primary">Account identity</p>
+            <h1 className="mt-1 text-3xl font-black tracking-tight">My Profile</h1>
           </div>
+        </header>
+
+        {visibleProfileState === 'loading' ? (
+          <ProfileLoading />
+        ) : visibleProfileState === 'unauthenticated' ? (
+          <ProfileNotice icon={ShieldCheck} title="Profile unavailable" message="Sign in before viewing your profile." />
+        ) : visibleProfileState === 'missing' ? (
+          <ProfileNotice icon={UserRound} title="Profile not found" message="No profile record is available for the authenticated account." />
+        ) : visibleProfileState === 'denied' ? (
+          <ProfileNotice alert icon={ShieldCheck} title="Profile access denied" message="The authenticated account is not permitted to read this profile." />
+        ) : visibleProfileState === 'error' ? (
+          <ProfileNotice alert icon={AlertTriangle} title="Profile unavailable" message="Your profile could not be loaded. No previous account information is displayed." />
+        ) : (
+          <>
+            <section className="mt-6 rounded-3xl border border-border bg-card p-6 text-center sm:p-8" aria-label="Authenticated user profile">
+              {visibleAvatarUrl ? (
+                <img src={visibleAvatarUrl} alt="Profile avatar" className="mx-auto h-24 w-24 rounded-full border-2 border-primary/40 object-cover" />
+              ) : (
+                <span className="mx-auto flex h-24 w-24 items-center justify-center rounded-full border-2 border-primary/40 bg-primary/10 text-3xl font-black text-primary">
+                  {visibleProfile.full_name?.charAt(0)?.toUpperCase() || '?'}
+                </span>
+              )}
+              <h2 className="mt-5 text-2xl font-black">{visibleProfile.full_name || 'Name not provided'}</h2>
+              <p className="mt-2 text-sm text-muted-foreground">Authenticated account profile</p>
+            </section>
+
+            <section className="mt-5 space-y-4" aria-label="Profile contact details">
+              <ContactField icon={Mail} label="Email" value={visibleProfile.email} verification={visibleProfile.email_verification} />
+              <ContactField icon={Phone} label="Phone" value={visibleProfile.phone} verification={visibleProfile.phone_verification} />
+            </section>
+          </>
         )}
 
-        {/* Avatar */}
-        <div className="flex flex-col items-center py-8">
-          <button onClick={() => avatarInputRef.current?.click()} disabled={profileDisabled || uploadingAvatar}
-            className="relative w-24 h-24 rounded-full mb-4 group">
-            {avatarUrl ? (
-              <img src={avatarUrl} alt="avatar"
-                className="w-24 h-24 rounded-full object-cover border-2 border-primary/40" />
-            ) : (
-              <div className="w-24 h-24 rounded-full bg-gradient-to-br from-primary/30 to-primary/10 border-2 border-primary/40 flex items-center justify-center">
-                <span className="text-3xl font-black text-primary">
-                  {(form.full_name || user?.full_name)?.charAt(0)?.toUpperCase() || '?'}
-                </span>
-              </div>
-            )}
-            <div className="absolute inset-0 rounded-full bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 group-active:opacity-100 transition-opacity">
-              {uploadingAvatar
-                ? <Loader2 className="w-6 h-6 text-white animate-spin" />
-                : <Camera className="w-6 h-6 text-white" />}
-            </div>
-          </button>
-          <input ref={avatarInputRef} type="file" accept="image/*" onChange={handleAvatarChange} className="hidden" />
-          <p className="text-xs text-muted-foreground mb-2">Tap to change photo</p>
-          <h2 className="text-xl font-bold">{form.full_name || user?.full_name || (loading ? 'Loading...' : '—')}</h2>
-          <span className={`mt-2 px-3 py-1 rounded-full text-xs font-semibold border ${roleColors[displayedRole] || roleColors.worker}`}>
-            {displayedRole.toUpperCase()}
-          </span>
-        </div>
-
-        {/* Fields */}
-        <div className="space-y-4">
-          {/* Name (editable) */}
-          <div className="bg-card rounded-2xl border border-border p-4">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-muted flex items-center justify-center">
-                <User className="w-4 h-4 text-muted-foreground" />
-              </div>
-              <div className="flex-1">
-                <p className="text-xs text-muted-foreground mb-1">Full Name</p>
-                <input
-                  value={form.full_name}
-                  onChange={e => setForm(f => ({ ...f, full_name: e.target.value }))}
-                  disabled={profileDisabled}
-                  placeholder="Enter your name"
-                  className="bg-transparent font-semibold w-full outline-none placeholder:text-muted-foreground/50"
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Email (read-only) */}
-          <div className="bg-card rounded-2xl border border-border p-4">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-muted flex items-center justify-center">
-                <Mail className="w-4 h-4 text-muted-foreground" />
-              </div>
-              <div className="flex-1">
-                <p className="text-xs text-muted-foreground mb-1">Email</p>
-                <p className="font-semibold">{user?.email || '—'}</p>
-              </div>
-            </div>
-          </div>
-
-          {/* Phone */}
-          <div className="bg-card rounded-2xl border border-border p-4">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-muted flex items-center justify-center">
-                <Phone className="w-4 h-4 text-muted-foreground" />
-              </div>
-              <div className="flex-1">
-                <p className="text-xs text-muted-foreground mb-1">Phone</p>
-                <input
-                  value={form.phone}
-                  onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
-                  disabled={profileDisabled}
-                  placeholder="+1 555 000 0000"
-                  className="bg-transparent font-semibold w-full outline-none placeholder:text-muted-foreground/50"
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Role (read-only) */}
-          <div className="bg-card rounded-2xl border border-border p-4">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-muted flex items-center justify-center">
-                <Shield className="w-4 h-4 text-muted-foreground" />
-              </div>
-              <div className="flex-1">
-                <p className="text-xs text-muted-foreground mb-1">Role</p>
-                <p className="font-semibold capitalize">{displayedRole}</p>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Save Button */}
-        <button
-          onClick={handleSave}
-          disabled={profileDisabled || saving}
-          className="w-full mt-6 mb-4 py-4 rounded-2xl bg-primary text-primary-foreground font-bold text-base flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-60"
-        >
-          <Save className="w-5 h-5" />
-          {saving ? 'Saving...' : loading ? 'Loading...' : 'Save Profile'}
-        </button>
-
-        <button
-          type="button"
-          onClick={handleSignOut}
-          disabled={signingOut}
-          className="w-full mb-8 py-4 rounded-2xl bg-destructive/15 text-destructive border border-destructive/30 font-bold text-base flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-60"
-        >
-          {signingOut ? (
-            <Loader2 className="w-5 h-5 animate-spin" />
-          ) : (
-            <LogOut className="w-5 h-5" />
-          )}
-          {signingOut ? 'Signing Out...' : 'Sign Out'}
-        </button>
+        <WorkspaceCard
+          loading={loadingCompany}
+          error={companyError}
+          workspace={workspace}
+          authenticated={Boolean(identityKey)}
+        />
       </div>
     </div>
   );
 }
+
+const ContactField = ({ icon: Icon, label, value, verification }) => (
+  <article className="rounded-2xl border border-border bg-card p-5">
+    <div className="flex items-start gap-4">
+      <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+        <Icon className="h-5 w-5" aria-hidden="true" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-bold uppercase tracking-[0.14em] text-muted-foreground">{label}</p>
+        <p className="mt-1 break-all font-semibold">{value || 'Not provided'}</p>
+        <span className={`mt-3 inline-block rounded-full border px-2.5 py-1 text-xs font-bold ${verificationStyles[verification]}`}>
+          {verificationLabels[verification]}
+        </span>
+      </div>
+    </div>
+  </article>
+);
+
+const WorkspaceCard = ({ loading, error, workspace, authenticated }) => {
+  let title = 'No active workspace';
+  let detail = authenticated ? 'Select an authorised company workspace to view your current role.' : 'Sign in to resolve a company workspace.';
+
+  if (loading) {
+    title = 'Resolving active workspace';
+    detail = 'Previous company-role information is hidden while the workspace changes.';
+  } else if (error) {
+    title = 'Workspace unavailable';
+    detail = 'The current company and membership role could not be confirmed.';
+  } else if (workspace) {
+    title = workspace.companyName || 'Current company';
+    detail = `${profileRoleLabel(workspace.role)} in this active workspace`;
+  }
+
+  return (
+    <section className="mt-5 rounded-3xl border border-border bg-card p-6" aria-label="Active company membership">
+      <div className="flex items-start gap-4">
+        <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+          <Building2 className="h-6 w-6" aria-hidden="true" />
+        </span>
+        <div>
+          <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">Active company membership</p>
+          <h2 className="mt-2 text-xl font-black">{title}</h2>
+          <p className="mt-1 text-sm text-muted-foreground">{detail}</p>
+        </div>
+      </div>
+    </section>
+  );
+};
+
+const ProfileLoading = () => (
+  <section className="mt-6 space-y-4" aria-label="Loading profile" aria-busy="true">
+    <div className="h-52 animate-pulse rounded-3xl border border-border bg-card" />
+    <div className="h-28 animate-pulse rounded-2xl border border-border bg-card" />
+    <div className="h-28 animate-pulse rounded-2xl border border-border bg-card" />
+  </section>
+);
+
+const ProfileNotice = ({ icon: Icon, title, message, alert = false }) => (
+  <section className={`mt-6 rounded-3xl border bg-card p-8 text-center ${alert ? 'border-amber-400/20' : 'border-border'}`} role={alert ? 'alert' : 'status'}>
+    <Icon className={`mx-auto h-9 w-9 ${alert ? 'text-amber-400' : 'text-primary'}`} aria-hidden="true" />
+    <h2 className="mt-4 text-xl font-black">{title}</h2>
+    <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-muted-foreground">{message}</p>
+  </section>
+);

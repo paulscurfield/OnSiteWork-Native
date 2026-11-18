@@ -22,6 +22,8 @@ import Calendar from './pages/Calendar';
 import TeamMap from './pages/TeamMap';
 import SitePhotos from './pages/SitePhotos';
 import PreStart from './pages/PreStart';
+import JobModuleRecords from './pages/JobModuleRecords';
+import Team from './pages/Team';
 import Login from './pages/Login';
 import InviteAccept from './pages/InviteAccept';
 
@@ -128,6 +130,8 @@ const AppRoutes = () => (
         <Route path="/" element={<Dashboard />} />
         <Route path="/profile" element={<Profile />} />
         <Route path="/jobs" element={<Jobs />} />
+        <Route path="/work/:moduleKey/jobs" element={<Jobs />} />
+        <Route path="/work/:moduleKey/jobs/:jobId" element={<JobModuleRecords />} />
         <Route path="/clockin/:jobId" element={<ClockIn />} />
         <Route path="/timesheets" element={<Timesheets />} />
         <Route path="/messages" element={<Messages />} />
@@ -135,6 +139,7 @@ const AppRoutes = () => (
         <Route path="/admin" element={<Admin />} />
         <Route path="/leave" element={<Leave />} />
         <Route path="/calendar" element={<Calendar />} />
+        <Route path="/team" element={<Team />} />
         <Route path="/team-map" element={<TeamMap />} />
         <Route path="/site-photos" element={<SitePhotos />} />
         <Route path="/prestart" element={<PreStart />} />

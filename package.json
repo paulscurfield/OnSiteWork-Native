@@ -9,6 +9,7 @@
     "lint": "eslint . --quiet",
     "lint:fix": "eslint . --fix",
     "test:w00": "node --test tests/w00/*.test.mjs",
+    "test:w02": "node --test tests/w02/*.test.mjs",
     "typecheck": "tsc -p ./jsconfig.json",
     "preview": "vite preview"
   },

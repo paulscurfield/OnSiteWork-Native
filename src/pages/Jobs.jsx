@@ -2,9 +2,11 @@ import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { onsiteApi } from '@/api/supabase/adapter';
 import { useCompany } from '@/lib/companyContext';
-import { Link } from 'react-router-dom';
-import { Briefcase, MapPin, ChevronLeft, ChevronRight, Search, Trash2, Pencil, X, Navigation, Plus, Check } from 'lucide-react';
+import { Link, useParams } from 'react-router-dom';
+import { AlertTriangle, Briefcase, MapPin, ChevronLeft, ChevronRight, Search, Trash2, Pencil, X, Navigation, Plus, Check } from 'lucide-react';
 import { toast } from 'sonner';
+import { getJobFirstModule, getJobRecordsPath, isValidJobIdentifier } from '@/navigation/dashboard-modules';
+import { formatJobStatusLabel } from '@/pages/job-status';
 
 const statusColors = {
   active: 'bg-green-500/20 text-green-400 border-green-500/30',
@@ -39,10 +41,14 @@ const resolveSupabaseCompany = (profile, companyRows) => {
 
 export default function Jobs() {
   const { company } = useCompany();
+  const { moduleKey } = useParams();
+  const jobModule = moduleKey ? getJobFirstModule(moduleKey) : null;
+  const invalidModule = Boolean(moduleKey && !jobModule);
   const requestIdRef = useRef(0);
   const [supabaseCompany, setSupabaseCompany] = useState(null);
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [search, setSearch] = useState('');
   const [editJob, setEditJob] = useState(null);
   const [editForm, setEditForm] = useState(/** @type {JobEditForm} */ ({}));
@@ -53,11 +59,20 @@ export default function Jobs() {
   const [deleteSavingId, setDeleteSavingId] = useState(null);
 
   useEffect(() => {
-    if (!company) return;
+    if (!company || invalidModule) {
+      requestIdRef.current += 1;
+      setSupabaseCompany(null);
+      setJobs([]);
+      setLoadError(invalidModule ? 'This job-first module is not available.' : '');
+      setLoading(false);
+      return;
+    }
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
     setLoading(true);
     setSupabaseCompany(null);
+    setJobs([]);
+    setLoadError('');
 
     const loadJobs = async () => {
       try {
@@ -81,6 +96,7 @@ export default function Jobs() {
           console.error('Failed to load Supabase jobs:', error);
           setSupabaseCompany(null);
           setJobs([]);
+          setLoadError(error?.message || 'Jobs are unavailable while the backend connection is offline.');
         }
       } finally {
         if (requestId === requestIdRef.current) {
@@ -93,7 +109,7 @@ export default function Jobs() {
     return () => {
       requestIdRef.current += 1;
     };
-  }, [company]);
+  }, [company, invalidModule]);
 
   const handleDelete = async (e, jobId) => {
     e.preventDefault();
@@ -185,11 +201,22 @@ export default function Jobs() {
         <Link to="/" className="w-9 h-9 rounded-xl bg-secondary flex items-center justify-center">
           <ChevronLeft className="w-5 h-5" />
         </Link>
-        <h1 className="text-2xl font-black flex-1">Job Sites</h1>
-        <button onClick={() => setShowAddModal(true)}
-          className="w-9 h-9 rounded-xl bg-primary flex items-center justify-center">
-          <Plus className="w-5 h-5 text-primary-foreground" />
-        </button>
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-bold uppercase tracking-wider text-primary">
+            {jobModule ? `${jobModule.label} · Select a job` : 'Company workspace'}
+          </p>
+          <h1 className="truncate text-2xl font-black">{jobModule ? 'Choose a Job Site' : 'Job Sites'}</h1>
+        </div>
+        {!jobModule && !invalidModule && (
+          <button
+            type="button"
+            onClick={() => setShowAddModal(true)}
+            className="w-9 h-9 rounded-xl bg-primary flex items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+            aria-label="Add job site"
+          >
+            <Plus className="w-5 h-5 text-primary-foreground" />
+          </button>
+        )}
       </div>
 
       {/* Search */}
@@ -199,7 +226,8 @@ export default function Jobs() {
           <input
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder="Search jobs..."
+            placeholder={jobModule ? `Search jobs for ${jobModule.label.toLowerCase()}...` : 'Search jobs...'}
+            aria-label="Search jobs"
             className="bg-transparent flex-1 outline-none text-sm placeholder:text-muted-foreground"
           />
         </div>
@@ -310,11 +338,20 @@ export default function Jobs() {
           Array(4).fill(0).map((_, i) => (
             <div key={i} className="h-24 rounded-2xl bg-card border border-border animate-pulse" />
           ))
+        ) : loadError ? (
+          <div className="rounded-2xl border border-amber-400/20 bg-amber-400/5 px-6 py-12 text-center" role="alert">
+            <AlertTriangle className="mx-auto mb-3 h-10 w-10 text-amber-400" />
+            <p className="font-bold">Jobs unavailable</p>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-muted-foreground">{loadError}</p>
+            <p className="mt-2 text-xs text-muted-foreground">No cached job list is displayed when company-scoped loading fails.</p>
+          </div>
         ) : filtered.length === 0 ? (
           <div className="text-center py-16">
             <Briefcase className="w-12 h-12 text-muted-foreground/30 mx-auto mb-3" />
             <p className="text-muted-foreground">No job sites found</p>
-            <p className="text-muted-foreground/60 text-sm mt-1">Admin can add jobs from the Admin panel</p>
+            <p className="text-muted-foreground/60 text-sm mt-1">
+              {jobModule ? `No company jobs are available for ${jobModule.label}.` : 'Company owners and admins can add jobs from the protected administration workspace.'}
+            </p>
           </div>
         ) : (
           filtered.map(job => (
@@ -334,42 +371,57 @@ export default function Jobs() {
                     </div>
                   )}
                 </div>
-                <span className={`flex-shrink-0 text-[10px] px-2 py-0.5 rounded-full border font-semibold uppercase ${statusColors[job.status] || statusColors.active}`}>
-                  {job.status}
+                <span className={`flex-shrink-0 text-[10px] px-2 py-0.5 rounded-full border font-semibold ${statusColors[job.status] || statusColors.active}`}>
+                  {formatJobStatusLabel(job.status)}
                 </span>
               </div>
               {/* Bottom row: Directions + admin buttons + clock in */}
-              <div className="flex items-center gap-2 mt-3">
-                {(job.latitude && job.longitude) || job.location_address ? (
-                  <a
-                    href={
-                      job.latitude && job.longitude
-                        ? `https://www.google.com/maps/dir/?api=1&destination=${job.latitude},${job.longitude}`
-                        : `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(job.location_address)}`
-                    }
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400 text-xs font-semibold"
-                  >
-                    <Navigation className="w-3.5 h-3.5" />
-                    Directions
-                  </a>
-                ) : null}
-                <div className="flex-1" />
-                <button onClick={(e) => openEdit(e, job)}
-                  className="w-8 h-8 rounded-xl bg-secondary flex items-center justify-center hover:bg-primary/20 transition-colors">
-                  <Pencil className="w-4 h-4 text-muted-foreground" />
-                </button>
-                <button onClick={(e) => handleDelete(e, job.id)} disabled={deleteSavingId === job.id}
-                  className="w-8 h-8 rounded-xl bg-destructive/10 flex items-center justify-center hover:bg-destructive/20 transition-colors">
-                  <Trash2 className="w-4 h-4 text-destructive" />
-                </button>
-                <Link to={`/clockin/${job.id}`}
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-bold">
-                  <ChevronRight className="w-4 h-4" />
-                  Clock In
+              {jobModule && isValidJobIdentifier(job.id) ? (
+                <Link
+                  to={getJobRecordsPath(jobModule.key, job.id)}
+                  className="mt-3 flex min-h-11 w-full items-center justify-between rounded-xl bg-primary px-4 text-sm font-bold text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                  aria-label={`Open ${jobModule.label} for ${job.job_name}`}
+                >
+                  Open {jobModule.label}
+                  <ChevronRight className="h-4 w-4" aria-hidden="true" />
                 </Link>
-              </div>
+              ) : jobModule ? (
+                <p className="mt-3 rounded-xl border border-amber-400/20 bg-amber-400/5 p-3 text-xs text-amber-500" role="alert">
+                  This job does not have a valid identifier and cannot be opened safely.
+                </p>
+              ) : (
+                <div className="flex items-center gap-2 mt-3">
+                  {(job.latitude && job.longitude) || job.location_address ? (
+                    <a
+                      href={
+                        job.latitude && job.longitude
+                          ? `https://www.google.com/maps/dir/?api=1&destination=${job.latitude},${job.longitude}`
+                          : `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(job.location_address)}`
+                      }
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400 text-xs font-semibold"
+                    >
+                      <Navigation className="w-3.5 h-3.5" />
+                      Directions
+                    </a>
+                  ) : null}
+                  <div className="flex-1" />
+                  <button onClick={(e) => openEdit(e, job)}
+                    className="w-8 h-8 rounded-xl bg-secondary flex items-center justify-center hover:bg-primary/20 transition-colors">
+                    <Pencil className="w-4 h-4 text-muted-foreground" />
+                  </button>
+                  <button onClick={(e) => handleDelete(e, job.id)} disabled={deleteSavingId === job.id}
+                    className="w-8 h-8 rounded-xl bg-destructive/10 flex items-center justify-center hover:bg-destructive/20 transition-colors">
+                    <Trash2 className="w-4 h-4 text-destructive" />
+                  </button>
+                  <Link to={`/clockin/${job.id}`}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-bold">
+                    <ChevronRight className="w-4 h-4" />
+                    Clock In
+                  </Link>
+                </div>
+              )}
             </div>
           ))
         )}

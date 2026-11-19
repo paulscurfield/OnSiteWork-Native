@@ -15,6 +15,9 @@
     "test:w03d": "node --test tests/w03d/*.test.mjs",
     "test:w03e": "node --test tests/w03e/*.test.mjs",
     "test:w03f": "node --test tests/w03f/*.test.mjs",
+    "test:w03g": "node --test tests/w03g/*.test.mjs",
+    "test:w03i": "node --test tests/w03i/*.test.mjs",
+    "test:w03j": "node --test tests/w03j/*.test.mjs",
     "typecheck": "tsc -p ./jsconfig.json",
     "preview": "vite preview"
   },

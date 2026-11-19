@@ -1,8 +1,11 @@
 import { supabase } from './client';
+import { createCalendarReadAdapter } from './calendar-read-adapter';
 import { createEquipmentReadAdapter } from './equipment-read-adapter';
 import { createJobsReadAdapter } from './jobs-read-adapter';
+import { createLeaveReadAdapter } from './leave-read-adapter';
 import { createProfileReadAdapter } from './profile-read-adapter';
 import { createTeamDirectoryReadAdapter } from './team-directory-read-adapter';
+import { createTimesheetsReadAdapter } from './timesheets-read-adapter';
 import { createWorkspaceAdapter } from './workspace-adapter';
 
 const orderQuery = (query, orderBy) => {
@@ -2102,9 +2105,17 @@ const createTeamMapAdapter = () => ({
 });
 
 export const onsiteApi = {
+  calendarRead: createCalendarReadAdapter((rpcName, params) => (
+    supabase.rpc(rpcName, params)
+  )),
+
   equipmentRead: createEquipmentReadAdapter(tableName => supabase.from(tableName)),
 
   jobs: createJobsReadAdapter(tableName => supabase.from(tableName)),
+
+  leaveRead: createLeaveReadAdapter((rpcName, params) => (
+    supabase.rpc(rpcName, params)
+  )),
 
   profileRead: createProfileReadAdapter(
     () => supabase.auth.getUser(),
@@ -2114,6 +2125,8 @@ export const onsiteApi = {
   teamDirectory: createTeamDirectoryReadAdapter((rpcName, params) => (
     supabase.rpc(rpcName, params)
   )),
+
+  timesheetsRead: createTimesheetsReadAdapter(tableName => supabase.from(tableName)),
 
   workspaces: createWorkspaceAdapter((rpcName, params) => (
     params === undefined ? supabase.rpc(rpcName) : supabase.rpc(rpcName, params)

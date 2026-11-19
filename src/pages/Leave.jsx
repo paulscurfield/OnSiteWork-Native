@@ -1,323 +1,256 @@
-import { useState, useEffect, useRef } from 'react';
-import { createPortal } from 'react-dom';
-import { onsiteApi } from '@/api/supabase/adapter';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { AlertTriangle, CalendarDays, ChevronLeft, ShieldCheck, UserRound, UsersRound } from 'lucide-react';
+import { format, parseISO } from 'date-fns';
 import { Link } from 'react-router-dom';
-import { ChevronLeft, CalendarOff, Plus, X, Check, Clock, CheckCircle, XCircle } from 'lucide-react';
-import { format, parseISO, differenceInCalendarDays } from 'date-fns';
-import { toast } from 'sonner';
+import { onsiteApi } from '@/api/supabase/adapter';
+import { useAuth } from '@/lib/AuthContext';
+import { useCompany } from '@/lib/companyContext';
+import {
+  canReadCompanyLeave,
+  createLeaveScopeKey,
+  isLeavePermissionError,
+  resolveLeaveReadScope,
+} from '@/lib/leave-access';
 
-const leaveTypeColors = {
-  annual:   'bg-blue-500/15 text-blue-400 border-blue-500/25',
-  sick:     'bg-rose-500/15 text-rose-400 border-rose-500/25',
-  personal: 'bg-purple-500/15 text-purple-400 border-purple-500/25',
-  other:    'bg-secondary text-muted-foreground border-border',
+const leaveTypeLabels = {
+  annual: 'Annual leave',
+  sick: 'Sick leave',
+  personal: 'Personal leave',
+  other: 'Other / unpaid leave',
 };
 
-const statusConfig = {
-  pending:  { label: 'Pending',  icon: Clock,        color: 'text-amber-400',  bg: 'bg-amber-500/15'  },
-  approved: { label: 'Approved', icon: CheckCircle,  color: 'text-green-400',  bg: 'bg-green-500/15'  },
-  declined: { label: 'Declined', icon: XCircle,      color: 'text-rose-400',   bg: 'bg-rose-500/15'   },
+const leaveTypeStyles = {
+  annual: 'border-blue-500/25 bg-blue-500/10 text-blue-400',
+  sick: 'border-rose-500/25 bg-rose-500/10 text-rose-400',
+  personal: 'border-purple-500/25 bg-purple-500/10 text-purple-400',
+  other: 'border-border bg-secondary text-muted-foreground',
 };
 
-const emptyForm = { leave_type: 'annual', start_date: '', end_date: '', notes: '' };
-
-const resolveSupabaseCompany = (profile, companyRows) => {
-  if (!profile?.id) {
-    throw new Error('Not authenticated with Supabase');
-  }
-  if (companyRows.length === 0) {
-    throw new Error('No Supabase company found for Leave requests');
-  }
-  if (companyRows.length > 1) {
-    throw new Error('Multiple Supabase companies found. A company selector is required before Leave can load safely.');
-  }
-  return companyRows[0];
+const statusLabels = { pending: 'Pending', approved: 'Approved', declined: 'Declined' };
+const statusStyles = {
+  pending: 'bg-amber-500/10 text-amber-400',
+  approved: 'bg-emerald-500/10 text-emerald-400',
+  declined: 'bg-rose-500/10 text-rose-400',
 };
 
-const requireMembership = (rows = []) => {
-  if (rows.length !== 1) {
-    throw new Error('Current user is not a member of the resolved Supabase company');
-  }
-  return rows[0];
-};
-
-const isAdminMembership = (membership) => membership?.role === 'owner' || membership?.role === 'admin';
+const displayDate = value => format(parseISO(value), 'd MMM yyyy');
+const displayRange = request => request.start_date === request.end_date
+  ? displayDate(request.start_date)
+  : `${displayDate(request.start_date)} – ${displayDate(request.end_date)}`;
 
 export default function Leave() {
+  const { user } = useAuth();
+  const { company, membership, loadingCompany, companyError } = useCompany();
   const requestIdRef = useRef(0);
-  const mountedRef = useRef(false);
-  const [profile, setProfile] = useState(null);
-  const [supabaseCompany, setSupabaseCompany] = useState(null);
-  const [membership, setMembership] = useState(null);
-  const [requests, setRequests] = useState([]);
-  const [loading, setLoading]   = useState(true);
-  const [loadError, setLoadError] = useState('');
-  const [showModal, setShowModal] = useState(false);
-  const [form, setForm] = useState(emptyForm);
-  const [saving, setSaving] = useState(false);
-  const isAdmin = isAdminMembership(membership);
+  const [personalRequests, setPersonalRequests] = useState([]);
+  const [companyRequests, setCompanyRequests] = useState([]);
+  const [resultScopeKey, setResultScopeKey] = useState(null);
+  const [personalState, setPersonalState] = useState('loading');
+  const [companyState, setCompanyState] = useState('unavailable');
+
+  const leaveScope = useMemo(() => resolveLeaveReadScope({
+    userId: user?.id,
+    company,
+    membership,
+  }), [company, membership, user?.id]);
+  const leaveScopeKey = createLeaveScopeKey(leaveScope);
+  const canReadCompany = canReadCompanyLeave(leaveScope);
+  const hasCurrentResult = Boolean(leaveScopeKey) && resultScopeKey === leaveScopeKey;
+  const visiblePersonalRequests = hasCurrentResult ? personalRequests : [];
+  const visibleCompanyRequests = hasCurrentResult ? companyRequests : [];
+  const visiblePersonalState = !leaveScope
+    ? 'unavailable'
+    : hasCurrentResult
+      ? personalState
+      : 'loading';
+  const visibleCompanyState = !canReadCompany
+    ? 'unavailable'
+    : hasCurrentResult
+      ? companyState
+      : 'loading';
 
   useEffect(() => {
-    mountedRef.current = true;
-    loadLeaveContext();
-    return () => {
-      mountedRef.current = false;
-      requestIdRef.current += 1;
-    };
-  }, []);
-
-  const loadLeaveContext = async () => {
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
-    setLoading(true);
-    setLoadError('');
-    setProfile(null);
-    setSupabaseCompany(null);
-    setMembership(null);
-    setRequests([]);
+    setPersonalRequests([]);
+    setCompanyRequests([]);
+    setResultScopeKey(null);
 
-    try {
-      const [currentProfile, companyRows] = await Promise.all([
-        onsiteApi.auth.me(),
-        onsiteApi.tables.companies.list('name'),
-      ]);
-      const resolvedCompany = resolveSupabaseCompany(currentProfile, companyRows);
-      const membershipRows = await onsiteApi.tables.companyMembers.filter({
-        company_id: resolvedCompany.id,
-        user_id: currentProfile.id,
-      });
-      const resolvedMembership = requireMembership(membershipRows);
-      const leaveRows = await onsiteApi.tables.leaveRequests.filter(
-        { company_id: resolvedCompany.id },
-        '-created_at'
-      );
+    if (!leaveScope || !leaveScopeKey) {
+      setPersonalState('unavailable');
+      setCompanyState('unavailable');
+      return;
+    }
 
-      if (!mountedRef.current || requestIdRef.current !== requestId) return;
-      setProfile(currentProfile);
-      setSupabaseCompany(resolvedCompany);
-      setMembership(resolvedMembership);
-      setRequests(leaveRows);
-    } catch (error) {
-      console.error('Failed to load Supabase Leave requests:', error);
-      if (!mountedRef.current || requestIdRef.current !== requestId) return;
-      setLoadError('Leave requests are unavailable. Try again later.');
-      setProfile(null);
-      setSupabaseCompany(null);
-      setMembership(null);
-      setRequests([]);
-    } finally {
-      if (mountedRef.current && requestIdRef.current === requestId) {
-        setLoading(false);
+    setPersonalState('loading');
+    setCompanyState(canReadCompany ? 'loading' : 'unavailable');
+    const personalRequest = onsiteApi.leaveRead.listMine(leaveScope);
+    const companyRequest = canReadCompany
+      ? onsiteApi.leaveRead.listCompany(leaveScope)
+      : Promise.resolve(null);
+
+    Promise.allSettled([personalRequest, companyRequest]).then(([personalResult, companyResult]) => {
+      if (requestId !== requestIdRef.current) return;
+
+      if (personalResult.status === 'fulfilled') {
+        setPersonalRequests(personalResult.value);
+        setPersonalState(personalResult.value.length === 0 ? 'empty' : 'ready');
+      } else {
+        console.error('Failed to load personal Supabase Leave requests:', personalResult.reason);
+        setPersonalRequests([]);
+        setPersonalState(isLeavePermissionError(personalResult.reason) ? 'denied' : 'error');
       }
-    }
-  };
 
-  const refreshRequests = async () => {
-    if (!supabaseCompany?.id) return;
-    const requestId = requestIdRef.current + 1;
-    requestIdRef.current = requestId;
+      if (canReadCompany) {
+        if (companyResult.status === 'fulfilled') {
+          setCompanyRequests(companyResult.value);
+          setCompanyState(companyResult.value.length === 0 ? 'empty' : 'ready');
+        } else {
+          console.error('Failed to load company Supabase Leave requests:', companyResult.reason);
+          setCompanyRequests([]);
+          setCompanyState(isLeavePermissionError(companyResult.reason) ? 'denied' : 'error');
+        }
+      }
 
-    try {
-      const leaveRows = await onsiteApi.tables.leaveRequests.filter(
-        { company_id: supabaseCompany.id },
-        '-created_at'
-      );
-      if (!mountedRef.current || requestIdRef.current !== requestId) return;
-      setLoadError('');
-      setRequests(leaveRows);
-    } catch (error) {
-      console.error('Failed to refresh Supabase Leave requests:', error);
-      if (!mountedRef.current || requestIdRef.current !== requestId) return;
-      setLoadError('Leave requests are unavailable. Try again later.');
-    }
-  };
+      setResultScopeKey(leaveScopeKey);
+    });
 
-  const handleSubmit = async () => {
-    if (!form.start_date || !form.end_date) { toast.error('Please fill in dates'); return; }
-    if (form.end_date < form.start_date) { toast.error('End date cannot be before start date'); return; }
-    if (!supabaseCompany?.id || !profile?.id) { toast.error('Leave requests are not ready yet'); return; }
+    return () => { requestIdRef.current += 1; };
+  }, [canReadCompany, leaveScope, leaveScopeKey]);
 
-    setSaving(true);
-    try {
-      await onsiteApi.tables.leaveRequests.createWorker({
-        company_id: supabaseCompany.id,
-        leave_type: form.leave_type,
-        start_date: form.start_date,
-        end_date: form.end_date,
-        notes: form.notes,
-      });
-      toast.success('Leave request submitted!');
-      setShowModal(false);
-      setForm(emptyForm);
-      await refreshRequests();
-    } catch (error) {
-      console.error('Failed to submit Supabase Leave request:', error);
-      toast.error('Failed to submit leave request');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleStatus = async (id, status) => {
-    if (!isAdmin || !['approved', 'declined'].includes(status) || !supabaseCompany?.id) return;
-    try {
-      await onsiteApi.tables.leaveRequests.reviewAdmin(id, {
-        company_id: supabaseCompany.id,
-        status,
-      });
-      toast.success(`Request ${status}`);
-      await refreshRequests();
-    } catch (error) {
-      console.error('Failed to review Supabase Leave request:', error);
-      toast.error('Failed to update request');
-    }
-  };
-
-  const handleDelete = async (id) => {
-    try {
-      await onsiteApi.tables.leaveRequests.delete(id);
-      toast.success('Request deleted');
-      await refreshRequests();
-    } catch (error) {
-      console.error('Failed to delete Supabase Leave request:', error);
-      toast.error('Failed to delete request');
-    }
-  };
+  const unavailableMessage = loadingCompany
+    ? 'The active company workspace is being confirmed. Previous-company Leave information is hidden.'
+    : companyError
+      ? 'The active company workspace could not be confirmed. No Leave information is displayed.'
+      : 'Sign in and select an authorised company workspace before viewing Leave information.';
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="px-6 pt-14 pb-4 flex items-center gap-4">
-        <Link to="/" className="w-9 h-9 rounded-xl bg-secondary flex items-center justify-center">
-          <ChevronLeft className="w-5 h-5" />
-        </Link>
-        <h1 className="text-2xl font-black flex-1">Leave Requests</h1>
-        <button onClick={() => setShowModal(true)} disabled={loading || Boolean(loadError) || !supabaseCompany}
-          className="w-9 h-9 rounded-xl bg-primary flex items-center justify-center">
-          <Plus className="w-5 h-5 text-primary-foreground" />
-        </button>
-      </div>
-
-      {/* List */}
-      <div className="px-6 space-y-3">
-        {loading ? (
-          Array(3).fill(0).map((_, i) => <div key={i} className="h-20 rounded-2xl bg-card border border-border animate-pulse" />)
-        ) : loadError ? (
-          <div className="text-center py-16">
-            <CalendarOff className="w-12 h-12 text-muted-foreground/30 mx-auto mb-3" />
-            <p className="text-muted-foreground">{loadError}</p>
+      <div className="mx-auto max-w-6xl px-5 pb-24 pt-10 sm:px-8 lg:pb-12 lg:pt-16">
+        <header className="flex items-start gap-4">
+          <Link to="/" aria-label="Back to dashboard" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-secondary text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+            <ChevronLeft className="h-5 w-5" aria-hidden="true" />
+          </Link>
+          <div>
+            <p className="text-xs font-bold uppercase tracking-[0.18em] text-primary">Read-only leave register</p>
+            <h1 className="mt-1 text-3xl font-black tracking-tight">Leave</h1>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
+              Review authorised leave information for {leaveScope?.companyName || 'the active company workspace'}.
+            </p>
           </div>
-        ) : requests.length === 0 ? (
-          <div className="text-center py-16">
-            <CalendarOff className="w-12 h-12 text-muted-foreground/30 mx-auto mb-3" />
-            <p className="text-muted-foreground">No leave requests yet</p>
-            <p className="text-muted-foreground/60 text-sm mt-1">Tap + to submit one</p>
+        </header>
+
+        <section className="mt-6 rounded-2xl border border-border bg-card px-5 py-4 text-sm text-muted-foreground">
+          This checkpoint is view-only. Leave requests and decisions remain unavailable in the web administration app.
+        </section>
+
+        <section className="mt-6" aria-labelledby="personal-leave-heading">
+          <div className="flex items-center gap-3">
+            <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+              <UserRound className="h-5 w-5" aria-hidden="true" />
+            </span>
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">Private self-service view</p>
+              <h2 id="personal-leave-heading" className="text-xl font-black">My leave requests</h2>
+            </div>
           </div>
-        ) : requests.map(r => {
-          const sc = statusConfig[r.status] || statusConfig.pending;
-          const StatusIcon = sc.icon;
-          const days = r.start_date && r.end_date
-            ? differenceInCalendarDays(parseISO(r.end_date), parseISO(r.start_date)) + 1
-            : null;
+          <LeaveRequestList
+            state={visiblePersonalState}
+            requests={visiblePersonalRequests}
+            unavailableMessage={unavailableMessage}
+            emptyMessage="No personal leave requests were returned for this workspace."
+            deniedMessage="Your personal Leave requests are not available for the confirmed workspace."
+            errorMessage="Personal Leave requests could not be loaded. No previous-account information is displayed."
+            showWorker={false}
+            showNotes
+          />
+        </section>
 
-          return (
-            <div key={r.id} className="bg-card border border-border rounded-2xl p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex-1 min-w-0">
-                  {isAdmin && (
-                    <p className="font-bold text-sm">{r.worker_name || r.worker_email}</p>
-                  )}
-                  <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                    <span className={`text-[10px] px-2 py-0.5 rounded-full border font-semibold uppercase ${leaveTypeColors[r.leave_type]}`}>
-                      {r.leave_type}
-                    </span>
-                    <span className={`flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase ${sc.bg} ${sc.color}`}>
-                      <StatusIcon className="w-3 h-3" />
-                      {sc.label}
-                    </span>
-                  </div>
-                  <p className="text-sm font-semibold mt-1.5">
-                    {r.start_date && format(parseISO(r.start_date), 'd MMM yyyy')}
-                    {' → '}
-                    {r.end_date && format(parseISO(r.end_date), 'd MMM yyyy')}
-                    {days && <span className="text-xs text-muted-foreground ml-1">({days} day{days > 1 ? 's' : ''})</span>}
-                  </p>
-                  {r.notes && <p className="text-xs text-muted-foreground mt-1">{r.notes}</p>}
-                </div>
-
-                <div className="flex flex-col gap-1.5 flex-shrink-0">
-                  {isAdmin && r.status === 'pending' && (
-                    <>
-                      <button onClick={() => handleStatus(r.id, 'approved')}
-                        className="w-8 h-8 rounded-lg bg-green-500/15 flex items-center justify-center hover:bg-green-500/25 transition-colors">
-                        <Check className="w-3.5 h-3.5 text-green-400" />
-                      </button>
-                      <button onClick={() => handleStatus(r.id, 'declined')}
-                        className="w-8 h-8 rounded-lg bg-rose-500/10 flex items-center justify-center hover:bg-rose-500/20 transition-colors">
-                        <X className="w-3.5 h-3.5 text-rose-400" />
-                      </button>
-                    </>
-                  )}
-                  {(isAdmin || r.status === 'pending') && (
-                    <button onClick={() => handleDelete(r.id)}
-                      className="w-8 h-8 rounded-lg bg-secondary flex items-center justify-center hover:bg-muted transition-colors">
-                      <X className="w-3 h-3 text-muted-foreground" />
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Apply Modal */}
-      {showModal && createPortal(
-        <div className="fixed inset-0 z-[9999] bg-black/60 flex items-end justify-center" onClick={() => setShowModal(false)}>
-          <div className="bg-card border border-border rounded-t-3xl w-full max-w-lg p-6 space-y-4" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-lg font-black">Apply for Leave</h2>
-              <button onClick={() => setShowModal(false)} className="w-8 h-8 rounded-xl bg-secondary flex items-center justify-center">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="space-y-3">
+        {canReadCompany && (
+          <section className="mt-10" aria-labelledby="company-leave-heading">
+            <div className="flex items-center gap-3">
+              <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                <UsersRound className="h-5 w-5" aria-hidden="true" />
+              </span>
               <div>
-                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Leave Type</label>
-                <select value={form.leave_type} onChange={e => setForm({ ...form, leave_type: e.target.value })}
-                  className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary">
-                  <option value="annual">Annual Leave</option>
-                  <option value="sick">Sick Leave</option>
-                  <option value="personal">Personal Leave</option>
-                  <option value="other">Other</option>
-                </select>
-              </div>
-              <div className="flex gap-3">
-                <div className="flex-1">
-                  <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Start Date</label>
-                  <input type="date" value={form.start_date} onChange={e => setForm({ ...form, start_date: e.target.value })}
-                    className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary" />
-                </div>
-                <div className="flex-1">
-                  <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">End Date</label>
-                  <input type="date" value={form.end_date} onChange={e => setForm({ ...form, end_date: e.target.value })}
-                    className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary" />
-                </div>
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Notes (optional)</label>
-                <textarea value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })}
-                  rows={2} placeholder="Any additional details..."
-                  className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary resize-none" />
+                <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">Owner and Admin view</p>
+                <h2 id="company-leave-heading" className="text-xl font-black">Company leave overview</h2>
               </div>
             </div>
-            <button onClick={handleSubmit} disabled={saving}
-              className="w-full py-3 rounded-2xl bg-primary text-primary-foreground font-bold text-sm disabled:opacity-60 transition-all active:scale-95">
-              {saving ? 'Submitting...' : 'Submit Leave Request'}
-            </button>
-          </div>
-        </div>,
-        document.body
-      )}
+            <LeaveRequestList
+              state={visibleCompanyState}
+              requests={visibleCompanyRequests}
+              unavailableMessage="Active Owner or Admin access is required."
+              emptyMessage="No company leave requests were returned for this workspace."
+              deniedMessage="Company Leave access was denied. No direct-table fallback was attempted."
+              errorMessage="Company Leave requests could not be loaded. No previous-company information is displayed."
+              showWorker
+              showNotes={false}
+            />
+          </section>
+        )}
+      </div>
     </div>
   );
 }
+
+const LeaveRequestList = ({
+  state,
+  requests,
+  unavailableMessage,
+  emptyMessage,
+  deniedMessage,
+  errorMessage,
+  showWorker,
+  showNotes,
+}) => {
+  if (state === 'loading') {
+    return (
+      <div className="mt-4 grid gap-4 md:grid-cols-2" aria-label="Loading Leave requests" aria-busy="true">
+        {Array.from({ length: 2 }, (_, index) => (
+          <div key={index} className="h-40 animate-pulse rounded-3xl border border-border bg-card" />
+        ))}
+      </div>
+    );
+  }
+
+  if (state === 'unavailable') return <LeaveNotice icon={ShieldCheck} title="Leave unavailable" message={unavailableMessage} />;
+  if (state === 'denied') return <LeaveNotice alert icon={ShieldCheck} title="Leave access restricted" message={deniedMessage} />;
+  if (state === 'error') return <LeaveNotice alert icon={AlertTriangle} title="Leave unavailable" message={errorMessage} />;
+  if (state === 'empty') return <LeaveNotice icon={CalendarDays} title="No leave requests" message={emptyMessage} />;
+
+  return (
+    <div className="mt-4 grid gap-4 md:grid-cols-2">
+      {requests.map(request => (
+        <article key={request.id} className="rounded-3xl border border-border bg-card p-5">
+          {showWorker && (
+            <p className="mb-4 flex items-center gap-2 font-black">
+              <UserRound className="h-4 w-4 text-primary" aria-hidden="true" />
+              {request.worker_name}
+            </p>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${leaveTypeStyles[request.leave_type]}`}>
+              {leaveTypeLabels[request.leave_type]}
+            </span>
+            <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${statusStyles[request.status]}`}>
+              {statusLabels[request.status]}
+            </span>
+          </div>
+          <p className="mt-4 font-bold">{displayRange(request)}</p>
+          {showNotes && request.notes && (
+            <p className="mt-3 border-t border-border pt-3 text-sm leading-6 text-muted-foreground">{request.notes}</p>
+          )}
+        </article>
+      ))}
+    </div>
+  );
+};
+
+const LeaveNotice = ({ icon: Icon, title, message, alert = false }) => (
+  <div className={`mt-4 rounded-3xl border bg-card p-8 text-center ${alert ? 'border-amber-400/20' : 'border-border'}`} role={alert ? 'alert' : 'status'}>
+    <Icon className={`mx-auto h-9 w-9 ${alert ? 'text-amber-400' : 'text-primary'}`} aria-hidden="true" />
+    <h3 className="mt-4 text-lg font-black">{title}</h3>
+    <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-muted-foreground">{message}</p>
+  </div>
+);

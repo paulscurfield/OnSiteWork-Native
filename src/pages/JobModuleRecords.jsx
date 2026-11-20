@@ -3,6 +3,9 @@ import { AlertTriangle, ArrowLeft, BriefcaseBusiness, DatabaseZap } from 'lucide
 import { Link, useParams } from 'react-router-dom';
 import { onsiteApi } from '@/api/supabase/adapter';
 import ModuleIcon from '@/components/navigation/ModuleIcon';
+import PurchaseOrderRecords from '@/components/purchase-orders/PurchaseOrderRecords';
+import SiteDiaryRecords from '@/components/site-diaries/SiteDiaryRecords';
+import ToolboxTalkRecords from '@/components/toolbox-talks/ToolboxTalkRecords';
 import { useAuth } from '@/lib/AuthContext';
 import { useCompany } from '@/lib/companyContext';
 import { createJobScopeKey, resolveJobReadScope } from '@/lib/job-access';
@@ -146,17 +149,25 @@ export default function JobModuleRecords() {
         </header>
 
         <section className="mt-5 grid gap-4 md:grid-cols-[minmax(0,1fr)_18rem]" aria-label={`${module.label} job status`}>
-          <div className="rounded-3xl border border-border bg-card p-6 sm:p-8">
-            <DatabaseZap className="h-8 w-8 text-primary" aria-hidden="true" />
-            <h2 className="mt-5 text-xl font-black">Module integration pending</h2>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-              Job access has been verified for {visibleJob.job_name}. {module.label} records are not connected during W03-C, so no module records have been requested, cached or fabricated.
-            </p>
-            <div className="mt-6 rounded-2xl border border-dashed border-border bg-secondary/40 p-5">
-              <p className="text-sm font-bold">No module records to display</p>
-              <p className="mt-1 text-xs leading-5 text-muted-foreground">The selected job is authorised; the module workflow remains deliberately unavailable until its own approved integration checkpoint.</p>
+          {module.key === 'purchase-orders' ? (
+            <PurchaseOrderRecords jobScope={jobScope} job={visibleJob} />
+          ) : module.key === 'toolbox-talks' ? (
+            <ToolboxTalkRecords jobScope={jobScope} job={visibleJob} />
+          ) : module.key === 'site-diaries' ? (
+            <SiteDiaryRecords jobScope={jobScope} job={visibleJob} />
+          ) : (
+            <div className="rounded-3xl border border-border bg-card p-6 sm:p-8">
+              <DatabaseZap className="h-8 w-8 text-primary" aria-hidden="true" />
+              <h2 className="mt-5 text-xl font-black">Module integration pending</h2>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
+                Job access has been verified for {visibleJob.job_name}. {module.label} records are not connected during W03-C, so no module records have been requested, cached or fabricated.
+              </p>
+              <div className="mt-6 rounded-2xl border border-dashed border-border bg-secondary/40 p-5">
+                <p className="text-sm font-bold">No module records to display</p>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">The selected job is authorised; the module workflow remains deliberately unavailable until its own approved integration checkpoint.</p>
+              </div>
             </div>
-          </div>
+          )}
 
           <aside className="rounded-3xl border border-border bg-card p-6" aria-label="Selected job context">
             <div className="flex items-center gap-3">

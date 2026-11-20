@@ -4,8 +4,11 @@ import { createEquipmentReadAdapter } from './equipment-read-adapter';
 import { createJobsReadAdapter } from './jobs-read-adapter';
 import { createLeaveReadAdapter } from './leave-read-adapter';
 import { createProfileReadAdapter } from './profile-read-adapter';
+import { createPurchaseOrdersReadAdapter } from './purchase-orders-read-adapter';
+import { createSiteDiariesReadAdapter } from './site-diaries-read-adapter';
 import { createTeamDirectoryReadAdapter } from './team-directory-read-adapter';
 import { createTimesheetsReadAdapter } from './timesheets-read-adapter';
+import { createToolboxTalksReadAdapter } from './toolbox-talks-read-adapter';
 import { createWorkspaceAdapter } from './workspace-adapter';
 
 const orderQuery = (query, orderBy) => {
@@ -2121,6 +2124,16 @@ export const onsiteApi = {
     () => supabase.auth.getUser(),
     tableName => supabase.from(tableName)
   ),
+
+  purchaseOrdersRead: createPurchaseOrdersReadAdapter(tableName => supabase.from(tableName)),
+
+  siteDiariesRead: createSiteDiariesReadAdapter((rpcName, params) => (
+    supabase.rpc(rpcName, params)
+  )),
+
+  toolboxTalksRead: createToolboxTalksReadAdapter((rpcName, params) => (
+    supabase.rpc(rpcName, params)
+  )),
 
   teamDirectory: createTeamDirectoryReadAdapter((rpcName, params) => (
     supabase.rpc(rpcName, params)

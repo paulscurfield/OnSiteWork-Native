@@ -18,6 +18,9 @@
     "test:w03g": "node --test tests/w03g/*.test.mjs",
     "test:w03i": "node --test tests/w03i/*.test.mjs",
     "test:w03j": "node --test tests/w03j/*.test.mjs",
+    "test:w04a": "node --test tests/w04a/*.test.mjs",
+    "test:w04b": "node --test tests/w04b/*.test.mjs",
+    "test:w04c": "node --test tests/w04c/*.test.mjs",
     "typecheck": "tsc -p ./jsconfig.json",
     "preview": "vite preview"
   },

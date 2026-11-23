@@ -9,6 +9,7 @@ import { createPurchaseOrdersReadAdapter } from './purchase-orders-read-adapter'
 import { createSiteDiariesReadAdapter } from './site-diaries-read-adapter';
 import { createSitePhotosReadAdapter } from './site-photos-read-adapter';
 import { createTeamDirectoryReadAdapter } from './team-directory-read-adapter';
+import { createTimesheetsAdminAdapter } from './timesheets-admin-adapter';
 import { createTimesheetsReadAdapter } from './timesheets-read-adapter';
 import { createToolboxTalksReadAdapter } from './toolbox-talks-read-adapter';
 import { createWorkspaceAdapter } from './workspace-adapter';
@@ -2149,6 +2150,11 @@ export const onsiteApi = {
   teamDirectory: createTeamDirectoryReadAdapter((rpcName, params) => (
     supabase.rpc(rpcName, params)
   )),
+
+  timesheetsAdmin: createTimesheetsAdminAdapter(
+    () => supabase.auth.getUser(),
+    (rpcName, params) => supabase.rpc(rpcName, params)
+  ),
 
   timesheetsRead: createTimesheetsReadAdapter(tableName => supabase.from(tableName)),
 

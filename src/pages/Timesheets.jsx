@@ -6,12 +6,18 @@ import {
   ChevronRight,
   Clock,
   LockKeyhole,
+  Pencil,
+  Plus,
+  RotateCcw,
   ShieldCheck,
+  Trash2,
   UserRound,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { onsiteApi } from '@/api/supabase/adapter';
+import { timesheetAdminErrorMessage } from '@/api/supabase/timesheets-admin-adapter';
 import { addTimesheetCalendarDays } from '@/api/supabase/timesheets-read-adapter';
+import TimesheetAdminActionDialog from '@/components/timesheets/TimesheetAdminActionDialog';
 import { useAuth } from '@/lib/AuthContext';
 import { useCompany } from '@/lib/companyContext';
 import {
@@ -63,13 +69,19 @@ export default function Timesheets() {
   const { user } = useAuth();
   const { company, membership, loadingCompany, companyError } = useCompany();
   const requestIdRef = useRef(0);
+  const adminResourceRequestIdRef = useRef(0);
+  const activeMutationContextRef = useRef(null);
   const [anchorDate, setAnchorDate] = useState(getSydneyDateKey);
   const [result, setResult] = useState(null);
   const [resultRequestKey, setResultRequestKey] = useState(null);
   const [timesheetState, setTimesheetState] = useState('loading');
+  const [reloadVersion, setReloadVersion] = useState(0);
   const [workerFilter, setWorkerFilter] = useState('all');
   const [jobFilter, setJobFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [adminResources, setAdminResources] = useState({ key: null, state: 'idle', jobs: [], members: [], error: '' });
+  const [adminAction, setAdminAction] = useState(null);
+  const [mutationState, setMutationState] = useState({ busy: false, error: '', success: '' });
 
   const timesheetScope = useMemo(() => resolveTimesheetReadScope({
     userId: user?.id,
@@ -78,6 +90,7 @@ export default function Timesheets() {
   }), [company, membership, user?.id]);
   const view = canReadCompanyTimesheets(timesheetScope) ? 'company' : 'mine';
   const requestKey = createTimesheetRequestKey(timesheetScope, anchorDate, view);
+  activeMutationContextRef.current = requestKey;
   const hasCurrentResult = Boolean(requestKey) && resultRequestKey === requestKey;
   const visibleResult = hasCurrentResult ? result : null;
   const visibleState = !timesheetScope
@@ -92,6 +105,8 @@ export default function Timesheets() {
     setWorkerFilter('all');
     setJobFilter('all');
     setStatusFilter('all');
+    setAdminAction(null);
+    setMutationState({ busy: false, error: '', success: '' });
   }, [requestKey]);
 
   useEffect(() => {
@@ -126,13 +141,50 @@ export default function Timesheets() {
       });
 
     return () => { requestIdRef.current += 1; };
-  }, [anchorDate, requestKey, timesheetScope, view]);
+  }, [anchorDate, reloadVersion, requestKey, timesheetScope, view]);
+
+  useEffect(() => {
+    const requestId = adminResourceRequestIdRef.current + 1;
+    adminResourceRequestIdRef.current = requestId;
+    setAdminResources({ key: null, state: 'idle', jobs: [], members: [], error: '' });
+    if (!timesheetScope || !requestKey || view !== 'company') return;
+
+    setAdminResources({ key: requestKey, state: 'loading', jobs: [], members: [], error: '' });
+    Promise.all([
+      onsiteApi.jobs.list(timesheetScope.companyId),
+      onsiteApi.teamDirectory.list(timesheetScope.companyId),
+    ])
+      .then(([jobs, members]) => {
+        if (requestId !== adminResourceRequestIdRef.current) return;
+        setAdminResources({ key: requestKey, state: 'ready', jobs, members, error: '' });
+      })
+      .catch(error => {
+        if (requestId !== adminResourceRequestIdRef.current) return;
+        console.error('Failed to load Timesheet administration resources:', error);
+        setAdminResources({
+          key: requestKey,
+          state: isTimesheetPermissionError(error) ? 'denied' : 'error',
+          jobs: [],
+          members: [],
+          error: isTimesheetPermissionError(error)
+            ? 'Current Owner/Admin access could not be confirmed.'
+            : 'Workers and Jobs could not be loaded for administrative actions.',
+        });
+      });
+
+    return () => { adminResourceRequestIdRef.current += 1; };
+  }, [requestKey, timesheetScope, view]);
 
   const periodByWorker = useMemo(() => new Map(
     (visibleResult?.periods ?? []).map(period => [period.worker_reference_id, period])
   ), [visibleResult]);
   const workerOptions = useMemo(() => {
     const workers = new Map();
+    if (adminResources.key === requestKey && adminResources.state === 'ready') {
+      for (const member of adminResources.members) {
+        workers.set(member.user_id, member.full_name || member.email || member.phone || 'Team member');
+      }
+    }
     for (const entry of visibleResult?.entries ?? []) {
       workers.set(entry.worker_reference_id, workerDisplayName(entry));
     }
@@ -143,7 +195,7 @@ export default function Timesheets() {
       );
     }
     return [...workers].sort((left, right) => left[1].localeCompare(right[1], 'en-AU'));
-  }, [visibleResult]);
+  }, [adminResources, requestKey, visibleResult]);
   const jobOptions = useMemo(() => {
     const jobs = new Map();
     for (const entry of visibleResult?.entries ?? []) {
@@ -151,14 +203,19 @@ export default function Timesheets() {
     }
     return [...jobs].sort((left, right) => left[1].localeCompare(right[1], 'en-AU'));
   }, [visibleResult]);
-  const adminSummaries = useMemo(() => workerOptions.map(([workerId, name]) => ({
-    workerId,
-    name,
-    status: periodByWorker.get(workerId)?.status ?? 'open',
-    totalHours: storedHoursTotal(
-      (visibleResult?.entries ?? []).filter(entry => entry.worker_reference_id === workerId)
-    ),
-  })), [periodByWorker, visibleResult, workerOptions]);
+  const adminSummaries = useMemo(() => workerOptions.map(([workerId, name]) => {
+    const entries = (visibleResult?.entries ?? []).filter(entry => entry.worker_reference_id === workerId);
+    const period = periodByWorker.get(workerId) ?? null;
+    return {
+      workerId,
+      name,
+      period,
+      status: period?.status ?? 'open',
+      totalHours: storedHoursTotal(entries),
+      entryCount: entries.length,
+      hasActiveEntries: entries.some(entry => entry.status === 'active'),
+    };
+  }), [periodByWorker, visibleResult, workerOptions]);
   const filteredEntries = useMemo(() => (visibleResult?.entries ?? []).filter(entry => (
     (workerFilter === 'all' || entry.worker_reference_id === workerFilter)
     && (jobFilter === 'all' || entry.job_id === jobFilter)
@@ -181,6 +238,92 @@ export default function Timesheets() {
     : companyError
       ? 'The active company workspace could not be confirmed. No time entries are displayed.'
       : 'Sign in and select an authorised company workspace before viewing Timesheets.';
+  const currentAdminResources = adminResources.key === requestKey ? adminResources : { state: 'idle', jobs: [], members: [], error: '' };
+  const adminWorkers = workerOptions.map(([id, name]) => ({ id, name }));
+
+  const openAdminAction = (type, details = {}) => {
+    if (view !== 'company' || !visibleResult || currentAdminResources.state !== 'ready' || mutationState.busy) return;
+    setMutationState({ busy: false, error: '', success: '' });
+    setAdminAction({ type, contextKey: requestKey, ...details });
+  };
+
+  const closeAdminAction = () => {
+    if (!mutationState.busy) {
+      setAdminAction(null);
+      setMutationState(current => ({ ...current, error: '' }));
+    }
+  };
+
+  const submitAdminAction = async (form) => {
+    if (!adminAction || !timesheetScope || !visibleResult || adminAction.contextKey !== requestKey) {
+      throw new Error('The active Timesheets workspace changed. Open the action again.');
+    }
+    const contextKey = adminAction.contextKey;
+    setMutationState({ busy: true, error: '', success: '' });
+    try {
+      if (adminAction.type === 'create') {
+        await onsiteApi.timesheetsAdmin.createManual(timesheetScope, {
+          ...form,
+          companyId: timesheetScope.companyId,
+          periodStatus: periodByWorker.get(form.workerReferenceId)?.status ?? 'open',
+          range: { periodStart: visibleResult.period_start, periodEnd: visibleResult.period_end },
+        });
+      } else if (adminAction.type === 'correct') {
+        await onsiteApi.timesheetsAdmin.correct(timesheetScope, {
+          ...form,
+          entry: {
+            ...adminAction.entry,
+            periodStatus: periodByWorker.get(adminAction.entry.worker_reference_id)?.status ?? 'open',
+          },
+          range: { periodStart: visibleResult.period_start, periodEnd: visibleResult.period_end },
+        });
+      } else if (adminAction.type === 'recover') {
+        await onsiteApi.timesheetsAdmin.recover(timesheetScope, {
+          ...form,
+          entry: {
+            ...adminAction.entry,
+            periodStatus: periodByWorker.get(adminAction.entry.worker_reference_id)?.status ?? 'open',
+          },
+          range: { periodStart: visibleResult.period_start, periodEnd: visibleResult.period_end },
+        });
+      } else if (adminAction.type === 'void') {
+        await onsiteApi.timesheetsAdmin.void(timesheetScope, {
+          reason: form.reason,
+          entry: {
+            ...adminAction.entry,
+            periodStatus: periodByWorker.get(adminAction.entry.worker_reference_id)?.status ?? 'open',
+          },
+          range: { periodStart: visibleResult.period_start, periodEnd: visibleResult.period_end },
+        });
+      } else if (adminAction.type === 'finalise') {
+        await onsiteApi.timesheetsAdmin.finalise(timesheetScope, {
+          workerReferenceId: adminAction.summary.workerId,
+          periodStatus: adminAction.summary.status,
+          entryCount: adminAction.summary.entryCount,
+          hasActiveEntries: adminAction.summary.hasActiveEntries,
+          range: { periodStart: visibleResult.period_start, periodEnd: visibleResult.period_end },
+        });
+      } else if (adminAction.type === 'reopen') {
+        await onsiteApi.timesheetsAdmin.reopen(timesheetScope, {
+          period: adminAction.summary.period,
+          reason: form.reason,
+          range: { periodStart: visibleResult.period_start, periodEnd: visibleResult.period_end },
+        });
+      } else {
+        throw new Error('Unsupported Timesheet action.');
+      }
+
+      if (activeMutationContextRef.current !== contextKey) return;
+      setAdminAction(null);
+      setMutationState({ busy: false, error: '', success: 'Timesheet action confirmed. Authoritative records have been refreshed.' });
+      setReloadVersion(version => version + 1);
+    } catch (error) {
+      if (activeMutationContextRef.current !== contextKey) return;
+      const message = timesheetAdminErrorMessage(error);
+      setMutationState({ busy: false, error: message, success: '' });
+      throw new Error(message);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -194,7 +337,9 @@ export default function Timesheets() {
             {timesheetScope ? `${timesheetScope.companyName} · ${roleLabel(timesheetScope.role)}` : 'Active workspace required'}
           </p>
         </div>
-        <span className="rounded-full border border-primary/20 bg-primary/10 px-3 py-1 text-[10px] font-black uppercase tracking-wider text-primary">Read only</span>
+        <span className="rounded-full border border-primary/20 bg-primary/10 px-3 py-1 text-[10px] font-black uppercase tracking-wider text-primary">
+          {view === 'company' ? 'Owner/Admin review' : 'Read only'}
+        </span>
       </header>
 
       <main className="space-y-4 px-6 pb-10">
@@ -243,6 +388,24 @@ export default function Timesheets() {
 
         {visibleResult && view === 'company' && (
           <>
+            <section className="flex flex-col gap-3 rounded-3xl border border-border bg-card p-4 sm:flex-row sm:items-center sm:justify-between" aria-label="Timesheet administration">
+              <div>
+                <h2 className="text-sm font-black">Timesheet administration</h2>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">Corrections and period changes are submitted to the audited native RPC boundary. Stored hours are never recalculated in the browser.</p>
+              </div>
+              <button
+                type="button"
+                disabled={currentAdminResources.state !== 'ready' || mutationState.busy}
+                onClick={() => openAdminAction('create')}
+                className="flex min-h-11 flex-shrink-0 items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-black text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Plus className="h-4 w-4" />
+                Add manual entry
+              </button>
+            </section>
+            {currentAdminResources.state === 'loading' && <p className="rounded-2xl border border-border bg-card p-4 text-xs text-muted-foreground" role="status">Confirming company workers and Jobs for administrative actions…</p>}
+            {['denied', 'error'].includes(currentAdminResources.state) && <p className="rounded-2xl border border-amber-400/20 bg-amber-400/5 p-4 text-xs text-amber-100" role="alert">{currentAdminResources.error} Existing read-only records remain available.</p>}
+            {mutationState.success && <p className="rounded-2xl border border-emerald-400/20 bg-emerald-400/5 p-4 text-xs text-emerald-200" role="status">{mutationState.success}</p>}
             <section className="grid gap-3 rounded-3xl border border-border bg-card p-4 md:grid-cols-3" aria-label="Timesheet filters">
               <FilterSelect label="Worker" value={workerFilter} onChange={setWorkerFilter}>
                 <option value="all">All workers</option>
@@ -264,12 +427,35 @@ export default function Timesheets() {
                 <h2 className="text-xs font-black uppercase tracking-wider text-muted-foreground">Company period states</h2>
                 <div className="mt-3 grid gap-2 md:grid-cols-2">
                   {adminSummaries.map(summary => (
-                    <div key={summary.workerId} className="flex items-center justify-between gap-3 rounded-2xl bg-muted/50 px-4 py-3">
+                    <div key={summary.workerId} className="flex flex-col gap-3 rounded-2xl bg-muted/50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
                       <div className="min-w-0">
                         <p className="truncate text-sm font-black">{summary.name}</p>
-                        <p className="mt-0.5 text-xs text-muted-foreground">{summary.totalHours.toFixed(2)} recorded hrs</p>
+                        <p className="mt-0.5 text-xs text-muted-foreground">{summary.totalHours.toFixed(2)} recorded hrs · {summary.entryCount} {summary.entryCount === 1 ? 'entry' : 'entries'}</p>
                       </div>
-                      <span className="rounded-full bg-primary/10 px-2 py-1 text-[10px] font-black uppercase text-primary">{periodStatusLabel(summary.status)}</span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-primary/10 px-2 py-1 text-[10px] font-black uppercase text-primary">{periodStatusLabel(summary.status)}</span>
+                        {summary.status === 'open' && (
+                          <button
+                            type="button"
+                            disabled={currentAdminResources.state !== 'ready' || mutationState.busy || summary.entryCount === 0 || summary.hasActiveEntries}
+                            onClick={() => openAdminAction('finalise', { worker: { id: summary.workerId, name: summary.name }, summary })}
+                            className="min-h-9 rounded-xl bg-primary px-3 text-xs font-black text-primary-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                            title={summary.hasActiveEntries ? 'Recover or finish the active entry first' : summary.entryCount === 0 ? 'At least one entry is required' : 'Finalise and lock this pay week'}
+                          >
+                            Finalise
+                          </button>
+                        )}
+                        {['approved', 'submitted'].includes(summary.status) && summary.period && (
+                          <button
+                            type="button"
+                            disabled={currentAdminResources.state !== 'ready' || mutationState.busy}
+                            onClick={() => openAdminAction('reopen', { worker: { id: summary.workerId, name: summary.name }, summary })}
+                            className="flex min-h-9 items-center gap-1 rounded-xl bg-secondary px-3 text-xs font-black text-foreground disabled:opacity-40"
+                          >
+                            <RotateCcw className="h-3.5 w-3.5" /> Reopen
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -305,6 +491,11 @@ export default function Timesheets() {
                         entry={entry}
                         periodStatus={periodByWorker.get(entry.worker_reference_id)?.status ?? 'open'}
                         showWorker={view === 'company'}
+                        canManage={view === 'company' && currentAdminResources.state === 'ready' && !mutationState.busy}
+                        onAction={(type) => openAdminAction(type, {
+                          entry,
+                          worker: { id: entry.worker_reference_id, name: workerDisplayName(entry) },
+                        })}
                       />
                     ))}
                   </div>
@@ -314,6 +505,19 @@ export default function Timesheets() {
           </div>
         )}
       </main>
+      {adminAction && visibleResult && view === 'company' && (
+        <TimesheetAdminActionDialog
+          key={`${adminAction.contextKey}:${adminAction.type}:${adminAction.entry?.id ?? adminAction.summary?.workerId ?? 'new'}`}
+          action={adminAction}
+          busy={mutationState.busy}
+          error={mutationState.error}
+          jobs={currentAdminResources.jobs}
+          onClose={closeAdminAction}
+          onSubmit={submitAdminAction}
+          range={{ periodStart: visibleResult.period_start, periodEnd: visibleResult.period_end }}
+          workers={adminWorkers}
+        />
+      )}
     </div>
   );
 }
@@ -327,7 +531,7 @@ const FilterSelect = ({ label, value, onChange, children }) => (
   </label>
 );
 
-const TimeEntryCard = ({ entry, periodStatus, showWorker }) => {
+const TimeEntryCard = ({ canManage, entry, onAction, periodStatus, showWorker }) => {
   const job = [entry.job_name, entry.job_number ? `#${entry.job_number}` : null].filter(Boolean).join(' · ') || 'No linked Job';
   const active = entry.status === 'active';
   return (
@@ -360,6 +564,24 @@ const TimeEntryCard = ({ entry, periodStatus, showWorker }) => {
             <span>{active || entry.total_hours === null ? 'Recorded hours pending' : `${entry.total_hours.toFixed(2)} recorded hrs`}</span>
           </div>
           {entry.notes && <p className="mt-2 text-xs leading-5 text-muted-foreground">{entry.notes}</p>}
+          {canManage && periodStatus === 'open' && (
+            <div className="mt-3 flex flex-wrap gap-2 border-t border-border pt-3" aria-label={`Administrative actions for ${job}`}>
+              {active ? (
+                <button type="button" onClick={() => onAction('recover')} className="flex min-h-9 items-center gap-1.5 rounded-xl bg-primary px-3 text-xs font-black text-primary-foreground">
+                  <Clock className="h-3.5 w-3.5" /> Recover entry
+                </button>
+              ) : (
+                <>
+                  <button type="button" onClick={() => onAction('correct')} className="flex min-h-9 items-center gap-1.5 rounded-xl bg-secondary px-3 text-xs font-black text-foreground">
+                    <Pencil className="h-3.5 w-3.5" /> Correct
+                  </button>
+                  <button type="button" onClick={() => onAction('void')} className="flex min-h-9 items-center gap-1.5 rounded-xl border border-rose-400/20 bg-rose-400/5 px-3 text-xs font-black text-rose-300">
+                    <Trash2 className="h-3.5 w-3.5" /> Void
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </article>

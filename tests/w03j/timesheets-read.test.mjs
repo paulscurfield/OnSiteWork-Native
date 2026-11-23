@@ -277,7 +277,8 @@ test('worker and administrative reads are separated and filters use confirmed id
   assert.match(page, /entry\.status === statusFilter/);
   assert.match(page, /No matching entries/);
   assert.match(page, /Company period states/);
-  assert.match(page, /periodByWorker\.get\(workerId\)\?\.status \?\? 'open'/);
+  assert.match(page, /const period = periodByWorker\.get\(workerId\) \?\? null/);
+  assert.match(page, /status: period\?\.status \?\? 'open'/);
 });
 
 test('Australian time presentation, read-only states and canonical stored totals are explicit', () => {
@@ -290,14 +291,17 @@ test('Australian time presentation, read-only states and canonical stored totals
   assert.equal(page.includes('finish_time - start_time'), false);
 });
 
-test('Timesheets integration contains no mutation, payroll, CSV or export action', () => {
-  const combined = `${readSource('src/pages/Timesheets.jsx')}\n${readSource('src/api/supabase/timesheets-read-adapter.js')}`.toLowerCase();
+test('Timesheets read adapter remains mutation-free and the page excludes payroll, export and worker submission', () => {
+  const readAdapter = readSource('src/api/supabase/timesheets-read-adapter.js').toLowerCase();
+  const page = readSource('src/pages/Timesheets.jsx').toLowerCase();
   for (const token of [
     '.insert(', '.update(', '.delete(', '.upsert(', 'clockintimeentry', 'clockouttimeentry',
-    'create_manual_time_entry', 'finalisetimesheet', 'reopentimesheet', 'create_payroll_export',
-    'get_payroll_export', 'exportcsv', 'exportmyob', 'blob(', 'download=', 'handlereject',
-    'handleapprove',
-  ]) assert.equal(combined.includes(token), false, token);
+    'create_manual_time_entry', 'finalisetimesheet', 'reopentimesheet',
+  ]) assert.equal(readAdapter.includes(token), false, token);
+  for (const token of [
+    'create_payroll_export', 'get_payroll_export', 'exportcsv', 'exportmyob', 'blob(',
+    'download=', 'submit_my_timesheet_period',
+  ]) assert.equal(page.includes(token), false, token);
 });
 
 test('dashboard and every prior W03 integration remain present', () => {

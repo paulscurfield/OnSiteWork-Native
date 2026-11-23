@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, ChevronRight, Clock3, History, Package, Search, ShieldCheck, UserRound, Wrench, X } from 'lucide-react';
 import { onsiteApi } from '@/api/supabase/adapter';
+import EquipmentPreStartHistory from '@/components/pre-starts/EquipmentPreStartHistory';
 import { useAuth } from '@/lib/AuthContext';
 import { useCompany } from '@/lib/companyContext';
 import {
@@ -218,7 +219,7 @@ export default function Equipment() {
         )}
       </div>
 
-      {selectedEquipmentId && <EquipmentDetail state={visibleDetailState} item={visibleDetail} onClose={() => setSelectedEquipmentId(null)} />}
+      {selectedEquipmentId && <EquipmentDetail state={visibleDetailState} item={visibleDetail} equipmentScope={equipmentScope} onClose={() => setSelectedEquipmentId(null)} />}
     </div>
   );
 }
@@ -292,7 +293,7 @@ const HistoryContent = ({ state, items, hasMore, role }) => {
   );
 };
 
-const EquipmentDetail = ({ state, item, onClose }) => (
+const EquipmentDetail = ({ state, item, equipmentScope, onClose }) => (
   <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-0 sm:items-center sm:p-6" role="dialog" aria-modal="true" aria-label="Equipment details" onClick={onClose}>
     <section className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-t-3xl border border-border bg-card p-6 sm:rounded-3xl" onClick={event => event.stopPropagation()}>
       <div className="flex items-center justify-between gap-4">
@@ -314,6 +315,7 @@ const EquipmentDetail = ({ state, item, onClose }) => (
           <DetailField label="Notes" value={item.notes || 'No notes recorded'} wide />
         </dl>
       )}
+      {state === 'ready' && item ? <EquipmentPreStartHistory equipmentScope={equipmentScope} equipment={item} /> : null}
     </section>
   </div>
 );

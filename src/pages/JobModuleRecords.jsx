@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom';
 import { onsiteApi } from '@/api/supabase/adapter';
 import ModuleIcon from '@/components/navigation/ModuleIcon';
 import PurchaseOrderRecords from '@/components/purchase-orders/PurchaseOrderRecords';
+import PreStartJobRecords from '@/components/pre-starts/PreStartJobRecords';
 import SiteDiaryRecords from '@/components/site-diaries/SiteDiaryRecords';
 import ToolboxTalkRecords from '@/components/toolbox-talks/ToolboxTalkRecords';
 import { useAuth } from '@/lib/AuthContext';
@@ -151,6 +152,8 @@ export default function JobModuleRecords() {
         <section className="mt-5 grid gap-4 md:grid-cols-[minmax(0,1fr)_18rem]" aria-label={`${module.label} job status`}>
           {module.key === 'purchase-orders' ? (
             <PurchaseOrderRecords jobScope={jobScope} job={visibleJob} />
+          ) : module.key === 'pre-starts' ? (
+            <PreStartJobRecords jobScope={jobScope} job={visibleJob} />
           ) : module.key === 'toolbox-talks' ? (
             <ToolboxTalkRecords jobScope={jobScope} job={visibleJob} />
           ) : module.key === 'site-diaries' ? (

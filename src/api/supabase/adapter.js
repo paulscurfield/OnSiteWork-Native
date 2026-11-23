@@ -4,6 +4,7 @@ import { createEquipmentReadAdapter } from './equipment-read-adapter';
 import { createJobsReadAdapter } from './jobs-read-adapter';
 import { createLeaveReadAdapter } from './leave-read-adapter';
 import { createProfileReadAdapter } from './profile-read-adapter';
+import { createPreStartsReadAdapter } from './pre-starts-read-adapter';
 import { createPurchaseOrdersReadAdapter } from './purchase-orders-read-adapter';
 import { createSiteDiariesReadAdapter } from './site-diaries-read-adapter';
 import { createTeamDirectoryReadAdapter } from './team-directory-read-adapter';
@@ -2124,6 +2125,10 @@ export const onsiteApi = {
     () => supabase.auth.getUser(),
     tableName => supabase.from(tableName)
   ),
+
+  preStartsRead: createPreStartsReadAdapter((rpcName, params) => (
+    supabase.rpc(rpcName, params)
+  )),
 
   purchaseOrdersRead: createPurchaseOrdersReadAdapter(tableName => supabase.from(tableName)),
 

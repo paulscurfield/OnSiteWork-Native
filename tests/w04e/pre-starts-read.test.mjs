@@ -471,10 +471,10 @@ test('previous modules, Equipment movement history and all five job-first routes
   }
 });
 
-test('Site Photos remains an unavailable shell and W04-A/B/C sources are untouched by integration wiring', () => {
+test('Site Photos owns its approved integration branch and W04-A/B/C sources remain present', () => {
   const jobPage = readSource('src/pages/JobModuleRecords.jsx');
-  assert.match(jobPage, /Module integration pending/);
-  assert.equal(jobPage.includes("module.key === 'site-photos' ?"), false);
+  assert.match(jobPage, /SitePhotoRecords/);
+  assert.equal(jobPage.includes("module.key === 'site-photos' ?"), true);
   for (const path of [
     'src/components/purchase-orders/PurchaseOrderRecords.jsx',
     'src/components/toolbox-talks/ToolboxTalkRecords.jsx',

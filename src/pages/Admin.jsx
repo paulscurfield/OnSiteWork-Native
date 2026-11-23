@@ -6,7 +6,7 @@ import { ChevronLeft, Plus, Pencil, Trash2, Download, Users, Clock, X, Check, Ma
 import { format, parseISO, startOfWeek, addDays } from 'date-fns';
 import { toast } from 'sonner';
 
-const tabs = ['Jobs', 'Timesheets', 'Workers', 'Photos', 'Pre-Starts'];
+const tabs = ['Jobs', 'Timesheets', 'Workers', 'Pre-Starts'];
 
 const resolveSupabaseCompany = (profile, companyRows) => {
   if (!profile?.id) {

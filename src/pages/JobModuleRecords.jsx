@@ -6,6 +6,7 @@ import ModuleIcon from '@/components/navigation/ModuleIcon';
 import PurchaseOrderRecords from '@/components/purchase-orders/PurchaseOrderRecords';
 import PreStartJobRecords from '@/components/pre-starts/PreStartJobRecords';
 import SiteDiaryRecords from '@/components/site-diaries/SiteDiaryRecords';
+import SitePhotoRecords from '@/components/site-photos/SitePhotoRecords';
 import ToolboxTalkRecords from '@/components/toolbox-talks/ToolboxTalkRecords';
 import { useAuth } from '@/lib/AuthContext';
 import { useCompany } from '@/lib/companyContext';
@@ -158,6 +159,8 @@ export default function JobModuleRecords() {
             <ToolboxTalkRecords jobScope={jobScope} job={visibleJob} />
           ) : module.key === 'site-diaries' ? (
             <SiteDiaryRecords jobScope={jobScope} job={visibleJob} />
+          ) : module.key === 'site-photos' ? (
+            <SitePhotoRecords jobScope={jobScope} job={visibleJob} />
           ) : (
             <div className="rounded-3xl border border-border bg-card p-6 sm:p-8">
               <DatabaseZap className="h-8 w-8 text-primary" aria-hidden="true" />

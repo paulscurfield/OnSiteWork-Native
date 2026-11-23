@@ -7,6 +7,7 @@ import { createProfileReadAdapter } from './profile-read-adapter';
 import { createPreStartsReadAdapter } from './pre-starts-read-adapter';
 import { createPurchaseOrdersReadAdapter } from './purchase-orders-read-adapter';
 import { createSiteDiariesReadAdapter } from './site-diaries-read-adapter';
+import { createSitePhotosReadAdapter } from './site-photos-read-adapter';
 import { createTeamDirectoryReadAdapter } from './team-directory-read-adapter';
 import { createTimesheetsReadAdapter } from './timesheets-read-adapter';
 import { createToolboxTalksReadAdapter } from './toolbox-talks-read-adapter';
@@ -2135,6 +2136,11 @@ export const onsiteApi = {
   siteDiariesRead: createSiteDiariesReadAdapter((rpcName, params) => (
     supabase.rpc(rpcName, params)
   )),
+
+  sitePhotosRead: createSitePhotosReadAdapter(
+    (rpcName, params) => supabase.rpc(rpcName, params),
+    (bucket, path, expiresIn) => supabase.storage.from(bucket).createSignedUrl(path, expiresIn)
+  ),
 
   toolboxTalksRead: createToolboxTalksReadAdapter((rpcName, params) => (
     supabase.rpc(rpcName, params)

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { onsiteApi } from '@/api/supabase/adapter';
 import { Link } from 'react-router-dom';
-import { ChevronLeft, Plus, Pencil, Trash2, Download, Users, Clock, X, Check, MapPin, FileText, UserPlus, Mail, Loader2, Camera, AlertTriangle } from 'lucide-react';
+import { ChevronLeft, Plus, Pencil, Trash2, Download, Users, Clock, X, Check, MapPin, UserPlus, Mail, Loader2, Camera, AlertTriangle } from 'lucide-react';
 import { format, parseISO, startOfWeek, addDays } from 'date-fns';
 import { toast } from 'sonner';
 
@@ -145,11 +145,6 @@ export default function Admin() {
   const [jobSaving, setJobSaving] = useState(false);
   const [weekStart, setWeekStart] = useState(startOfWeek(new Date(), { weekStartsOn: 4 }));
   const [jobForm, setJobForm] = useState({ job_name: '', job_number: '', location_address: '', latitude: '', longitude: '', notes: '', status: 'active' });
-  const [myobExporting, setMyobExporting] = useState(false);
-  const [myobProgress, setMyobProgress] = useState(0);
-  const [showEmailModal, setShowEmailModal] = useState(false);
-  const [emailAddress, setEmailAddress] = useState('');
-  const [sendingEmail, setSendingEmail] = useState(false);
   const [showRemoveModal, setShowRemoveModal] = useState(false);
   const [workerToRemove, setWorkerToRemove] = useState(null);
   const [removing, setRemoving] = useState(false);
@@ -157,8 +152,6 @@ export default function Admin() {
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState('worker');
   const [inviteSending, setInviteSending] = useState(false);
-  const [showMyobPickerModal, setShowMyobPickerModal] = useState(false);
-  const [selectedWorkerEmails, setSelectedWorkerEmails] = useState([]);
   const [editEntry, setEditEntry] = useState(null);
   const [editForm, setEditForm] = useState(/** @type {AdminEditEntryForm} */ ({}));
   const [editSaving, setEditSaving] = useState(false);
@@ -625,108 +618,6 @@ OnSite Timesheet`;
     }
   };
 
-  const exportCSV = () => {
-    const rows = [['Worker Name', 'Job Site', 'Job Number', 'Date', 'Start Time', 'Finish Time', 'Total Hours']];
-    entries.forEach(e => {
-      rows.push([
-        e.worker_name || '',
-        e.job_name || '',
-        e.job_number || '',
-        e.date || '',
-        e.start_time ? format(parseISO(e.start_time), 'HH:mm') : '',
-        e.finish_time ? format(parseISO(e.finish_time), 'HH:mm') : '',
-        e.total_hours?.toFixed(2) || '',
-      ]);
-    });
-    const csv = rows.map(r => r.join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `payroll-${format(weekStart, 'yyyy-MM-dd')}.csv`;
-    a.click();
-    toast.success('CSV exported!');
-  };
-
-  // Build MYOB-format CSV content
-  // MYOB Timesheets Import format: Employee Card ID, Payroll Category, Date, Hours
-  const buildMyobCsv = (filteredEntries) => {
-    const rows = [
-      ['Co./Last Name', 'First Name', 'Payroll Category', 'Date', 'Start Time', 'Finish Time', 'Hours', 'Job/Cost Centre', 'Notes'],
-    ];
-    filteredEntries.forEach(e => {
-      const nameParts = (e.worker_name || '').trim().split(' ');
-      const lastName = nameParts.slice(-1)[0] || '';
-      const firstName = nameParts.slice(0, -1).join(' ') || '';
-      rows.push([
-        `"${lastName}"`,
-        `"${firstName}"`,
-        '"Ordinary Hours"',
-        e.date ? format(parseISO(e.date), 'dd/MM/yyyy') : '',
-        e.start_time ? format(parseISO(e.start_time), 'HH:mm') : '',
-        e.finish_time ? format(parseISO(e.finish_time), 'HH:mm') : '',
-        e.total_hours?.toFixed(2) || '0.00',
-        `"${e.job_name || ''}"`,
-        `"${e.job_number || ''}"`,
-      ]);
-    });
-    return rows.map(r => r.join(',')).join('\n');
-  };
-
-  const doMYOBDownload = async (filteredEntries, filename) => {
-    setMyobExporting(true);
-    setMyobProgress(0);
-    const steps = [15, 35, 55, 75, 90, 100];
-    for (const pct of steps) {
-      await new Promise(res => setTimeout(res, 300));
-      setMyobProgress(pct);
-    }
-    const csv = buildMyobCsv(filteredEntries);
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = filename;
-    a.click();
-    await new Promise(res => setTimeout(res, 300));
-    setMyobExporting(false);
-    setMyobProgress(0);
-    toast.success('MYOB CSV exported!');
-  };
-
-  const exportMYOB = () => {
-    // Open picker modal — pre-select all workers
-    setSelectedWorkerEmails(Object.keys(workerGroups));
-    setShowMyobPickerModal(true);
-  };
-
-  const handleMyobPickerExport = () => {
-    setShowMyobPickerModal(false);
-    const filtered = entries.filter(e => selectedWorkerEmails.includes(e.worker_email));
-    const names = selectedWorkerEmails.map(email => workerGroups[email]?.name?.split(' ').join('_') || email).join('-');
-    doMYOBDownload(filtered, `MYOB-payroll-${names}-${format(weekStart, 'yyyy-MM-dd')}.csv`);
-  };
-
-  const exportWorkerMYOB = (worker) => {
-    doMYOBDownload(worker.entries, `MYOB-${worker.name?.split(' ').join('_')}-${format(weekStart, 'yyyy-MM-dd')}.csv`);
-  };
-
-  const handleEmailExport = async () => {
-    if (!emailAddress) { toast.error('Enter an email address'); return; }
-    setSendingEmail(true);
-    const csv = buildMyobCsv(entries);
-    const weekLabel = `${format(weekStart, 'd MMM')} – ${format(addDays(weekStart, 6), 'd MMM yyyy')}`;
-    const body = `Hi,\n\nPlease find attached the MYOB-ready payroll timesheet export for the week of ${weekLabel}.\n\nSummary:\n- Total entries: ${entries.length}\n- Total hours: ${totalHours.toFixed(2)} hrs\n- Workers: ${[...new Set(entries.map(e => e.worker_name))].join(', ')}\n\nThis file is formatted for direct import into MYOB.\n\nRegards,\nOnSite Timesheet`;
-    const { base44 } = await import('@/api/base44Client');
-    await base44.integrations.Core.SendEmail({
-      to: emailAddress,
-      subject: `MYOB Payroll Export – Week of ${weekLabel}`,
-      body,
-    });
-    toast.success(`Payroll report emailed to ${emailAddress}`);
-    setSendingEmail(false);
-    setShowEmailModal(false);
-    setEmailAddress('');
-  };
-
   const totalHours = entries.reduce((sum, e) => sum + (e.total_hours || 0), 0);
 
   // Group entries by worker
@@ -1050,19 +941,11 @@ OnSite Timesheet`;
             <button onClick={() => setWeekStart(d => addDays(d, 7))} className="px-3 py-2 rounded-xl bg-secondary text-sm font-semibold">Next →</button>
           </div>
 
-          {/* Export Buttons */}
-          <div className="flex gap-2 mb-4">
-            <button onClick={exportCSV} className="flex-1 py-3 rounded-2xl bg-green-500/15 border border-green-500/30 text-green-400 font-bold flex items-center justify-center gap-2 text-sm">
-              <Download className="w-4 h-4" />
-              Export CSV
-            </button>
-            <button onClick={exportMYOB} disabled={myobExporting} className="flex-1 py-3 rounded-2xl bg-blue-500/15 border border-blue-500/30 text-blue-400 font-bold flex items-center justify-center gap-2 text-sm disabled:opacity-60">
-              <FileText className="w-4 h-4" />
-              MYOB Export
-            </button>
-            <button onClick={() => setShowEmailModal(true)} className="w-12 py-3 rounded-2xl bg-purple-500/15 border border-purple-500/30 text-purple-400 font-bold flex items-center justify-center">
-              <Mail className="w-4 h-4" />
-            </button>
+          <div role="status" className="mb-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+            <p className="text-sm font-bold text-amber-300">Legacy payroll exports are disabled</p>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              Payroll files must come from an approved immutable export snapshot. This legacy page cannot download or email payroll files.
+            </p>
           </div>
 
           <div className="space-y-3 pb-6">
@@ -1124,13 +1007,6 @@ OnSite Timesheet`;
                     <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Week Total</span>
                     <div className="flex items-center gap-2">
                       <span className="font-black text-primary font-mono">{workerTotal.toFixed(2)} hrs</span>
-                      <button
-                        onClick={() => exportWorkerMYOB(worker)}
-                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-500/15 border border-blue-500/30 text-blue-400 text-xs font-semibold"
-                      >
-                        <FileText className="w-3 h-3" />
-                        MYOB
-                      </button>
                     </div>
                   </div>
                 </div>
@@ -1357,72 +1233,6 @@ OnSite Timesheet`;
         </div>
       )}
 
-      {/* MYOB Progress Modal */}
-      {myobExporting && createPortal(
-        <div className="fixed inset-0 z-[9999] bg-black/70 flex items-center justify-center px-8">
-          <div className="bg-card border border-border rounded-3xl p-8 w-full max-w-sm text-center space-y-5">
-            <div className="w-16 h-16 rounded-full bg-blue-500/15 border-2 border-blue-500/30 flex items-center justify-center mx-auto">
-              <Loader2 className="w-7 h-7 text-blue-400 animate-spin" />
-            </div>
-            <div>
-              <h3 className="font-black text-lg">Preparing MYOB Export</h3>
-              <p className="text-muted-foreground text-sm mt-1">Formatting timesheet data for MYOB payroll import...</p>
-            </div>
-            <div className="w-full bg-secondary rounded-full h-3 overflow-hidden">
-              <div
-                className="h-full bg-blue-400 rounded-full transition-all duration-500"
-                style={{ width: `${myobProgress}%` }}
-              />
-            </div>
-            <p className="text-blue-400 font-mono font-bold text-sm">{myobProgress}%</p>
-            <div className="text-xs text-muted-foreground space-y-1">
-              <p>✓ MYOB-compatible format (Co./Last Name, First Name)</p>
-              <p>✓ Payroll categories & cost centres included</p>
-              <p>✓ Ready for direct MYOB import</p>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
-
-      {/* Email Modal */}
-      {showEmailModal && createPortal(
-        <div className="fixed inset-0 z-[9999] bg-black/60 flex items-end justify-center" onClick={() => setShowEmailModal(false)}>
-          <div className="bg-card border border-border rounded-t-3xl w-full max-w-lg p-6 space-y-4" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-2">
-              <div>
-                <h2 className="text-lg font-black">Email Payroll Report</h2>
-                <p className="text-xs text-muted-foreground">Week of {format(weekStart, 'MMM d')} – {format(addDays(weekStart, 6), 'MMM d yyyy')} · {entries.length} entries · {totalHours.toFixed(2)} hrs</p>
-              </div>
-              <button onClick={() => setShowEmailModal(false)} className="w-8 h-8 rounded-xl bg-secondary flex items-center justify-center">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div>
-              <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Send to Email</label>
-              <input
-                value={emailAddress}
-                onChange={e => setEmailAddress(e.target.value)}
-                placeholder="payroll@company.com"
-                type="email"
-                className="mt-1 w-full bg-secondary border border-border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-1 focus:ring-primary"
-              />
-            </div>
-            <div className="bg-purple-500/10 border border-purple-500/20 rounded-xl px-4 py-3 text-xs text-purple-300 space-y-1">
-              <p className="font-semibold">Email will include:</p>
-              <p>• Week summary (workers, total hours)</p>
-              <p>• Note that CSV attachment is MYOB-ready</p>
-            </div>
-            <button onClick={handleEmailExport} disabled={sendingEmail}
-              className="w-full py-3 rounded-2xl bg-purple-500/80 text-white font-bold text-sm disabled:opacity-60 transition-all active:scale-95 flex items-center justify-center gap-2">
-              <Mail className="w-4 h-4" />
-              {sendingEmail ? 'Sending...' : 'Send Payroll Report'}
-            </button>
-          </div>
-        </div>,
-        document.body
-      )}
-
       {/* Invite Worker Modal */}
       {showInviteModal && createPortal(
         <div className="fixed inset-0 z-[9999] bg-black/60 flex items-end justify-center" onClick={closeInviteModal}>
@@ -1515,62 +1325,6 @@ OnSite Timesheet`;
                 {removing ? 'Removing...' : 'Remove'}
               </button>
             </div>
-          </div>
-        </div>,
-        document.body
-      )}
-
-      {/* MYOB Worker Picker Modal */}
-      {showMyobPickerModal && createPortal(
-        <div className="fixed inset-0 z-[9999] bg-black/60 flex items-end justify-center" onClick={() => setShowMyobPickerModal(false)}>
-          <div className="bg-card border border-border rounded-t-3xl w-full max-w-lg p-6 space-y-4" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-2">
-              <div>
-                <h2 className="text-lg font-black">MYOB Export</h2>
-                <p className="text-xs text-muted-foreground">Select which workers to include</p>
-              </div>
-              <button onClick={() => setShowMyobPickerModal(false)} className="w-8 h-8 rounded-xl bg-secondary flex items-center justify-center">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="space-y-2 max-h-64 overflow-y-auto">
-              {Object.values(workerGroups).map(worker => {
-                const checked = selectedWorkerEmails.includes(worker.email);
-                const workerTotal = worker.entries.reduce((sum, e) => sum + (e.total_hours || 0), 0);
-                return (
-                  <button key={worker.email}
-                    onClick={() => setSelectedWorkerEmails(prev =>
-                      checked ? prev.filter(e => e !== worker.email) : [...prev, worker.email]
-                    )}
-                    className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border transition-all ${checked ? 'bg-blue-500/10 border-blue-500/40' : 'bg-muted/30 border-border'}`}
-                  >
-                    <div className={`w-5 h-5 rounded-md border-2 flex items-center justify-center flex-shrink-0 ${checked ? 'bg-blue-500 border-blue-500' : 'border-muted-foreground/40'}`}>
-                      {checked && <Check className="w-3 h-3 text-white" />}
-                    </div>
-                    <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0">
-                      <span className="text-xs font-black text-primary">{worker.name?.charAt(0)?.toUpperCase() || '?'}</span>
-                    </div>
-                    <span className="flex-1 text-left font-semibold text-sm">{worker.name}</span>
-                    <span className="text-xs text-primary font-mono font-bold">{workerTotal.toFixed(2)}h</span>
-                  </button>
-                );
-              })}
-            </div>
-            <div className="flex gap-2 pt-1">
-              <button onClick={() => setSelectedWorkerEmails(Object.keys(workerGroups))}
-                className="flex-1 py-2 rounded-xl bg-muted text-muted-foreground text-xs font-semibold">
-                Select All
-              </button>
-              <button onClick={() => setSelectedWorkerEmails([])}
-                className="flex-1 py-2 rounded-xl bg-muted text-muted-foreground text-xs font-semibold">
-                Clear All
-              </button>
-            </div>
-            <button onClick={handleMyobPickerExport} disabled={selectedWorkerEmails.length === 0}
-              className="w-full py-3 rounded-2xl bg-blue-500/80 text-white font-bold text-sm disabled:opacity-40 transition-all active:scale-95 flex items-center justify-center gap-2">
-              <FileText className="w-4 h-4" />
-              Export {selectedWorkerEmails.length} Worker{selectedWorkerEmails.length !== 1 ? 's' : ''} to MYOB
-            </button>
           </div>
         </div>,
         document.body

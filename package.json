@@ -24,6 +24,7 @@
     "test:w04e": "node --test tests/w04e/*.test.mjs",
     "test:w04f": "node --test tests/w04f/*.test.mjs",
     "test:w05b": "node --test tests/w05b/*.test.mjs",
+    "test:w05c": "node --test tests/w05c/*.test.mjs",
     "typecheck": "tsc -p ./jsconfig.json",
     "preview": "vite preview"
   },

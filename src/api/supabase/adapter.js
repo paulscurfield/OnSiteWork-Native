@@ -3,6 +3,7 @@ import { createCalendarReadAdapter } from './calendar-read-adapter';
 import { createEquipmentReadAdapter } from './equipment-read-adapter';
 import { createJobsReadAdapter } from './jobs-read-adapter';
 import { createLeaveReadAdapter } from './leave-read-adapter';
+import { createPayrollExportAdapter } from './payroll-export-adapter';
 import { createProfileReadAdapter } from './profile-read-adapter';
 import { createPreStartsReadAdapter } from './pre-starts-read-adapter';
 import { createPurchaseOrdersReadAdapter } from './purchase-orders-read-adapter';
@@ -2110,6 +2111,10 @@ const createTeamMapAdapter = () => ({
   },
 });
 
+const workspaceAdapter = createWorkspaceAdapter((rpcName, params) => (
+  params === undefined ? supabase.rpc(rpcName) : supabase.rpc(rpcName, params)
+));
+
 export const onsiteApi = {
   calendarRead: createCalendarReadAdapter((rpcName, params) => (
     supabase.rpc(rpcName, params)
@@ -2122,6 +2127,12 @@ export const onsiteApi = {
   leaveRead: createLeaveReadAdapter((rpcName, params) => (
     supabase.rpc(rpcName, params)
   )),
+
+  payrollExports: createPayrollExportAdapter(
+    () => supabase.auth.getUser(),
+    () => workspaceAdapter.getActive(),
+    (rpcName, params) => supabase.rpc(rpcName, params)
+  ),
 
   profileRead: createProfileReadAdapter(
     () => supabase.auth.getUser(),
@@ -2158,9 +2169,7 @@ export const onsiteApi = {
 
   timesheetsRead: createTimesheetsReadAdapter(tableName => supabase.from(tableName)),
 
-  workspaces: createWorkspaceAdapter((rpcName, params) => (
-    params === undefined ? supabase.rpc(rpcName) : supabase.rpc(rpcName, params)
-  )),
+  workspaces: workspaceAdapter,
 
   auth: {
     async getSession() {
